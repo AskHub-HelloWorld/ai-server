@@ -15,7 +15,7 @@ TAGS_METADATA = [
     },
     {
         "name": "sources",
-        "description": "RAG 소스 등록 (Phase 2 — 현재 mock)",
+        "description": "RAG 소스 등록",
     },
     {
         "name": "파일 관리",
@@ -23,7 +23,7 @@ TAGS_METADATA = [
     },
     {
         "name": "ingestion-jobs",
-        "description": "문서/코드 인덱싱 작업 관리 (Phase 2 — 현재 mock)",
+        "description": "문서/코드 인덱싱 작업 관리",
     },
 ]
 
@@ -36,7 +36,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description=(
             "AskHub AI Server — 사내 개발자 대상 AI 챗봇 서비스\n\n"
             "## 주요 기능\n"
-            "- **AI 채팅**: Amazon Bedrock (Nova Micro)을 활용한 질의응답\n"
+            "- **AI 채팅**: Amazon Bedrock Nova Lite를 활용한 질의응답\n"
             "- **SSE 스트리밍**: 실시간 토큰 단위 응답 전달\n"
             "- **대화 히스토리**: ai-server가 ai schema에서 직접 관리\n"
             "- **파일 관리**: 파일 업로드 및 채팅 첨부 지원\n\n"

@@ -5,16 +5,16 @@
 ## Phase 0. 레포지토리 부트스트랩 ✅
 
 - Python/FastAPI 프로젝트 구조를 만든다.
-- health API와 mock chat API를 추가한다.
+- health API를 추가한다.
 - env 템플릿, multi-stage Dockerfile, compose.yaml, 기본 테스트를 추가한다.
 - 로컬 실행, 테스트, 린트는 Docker Compose 기준으로 통일한다.
 
 ## Phase 1. 기본 AI 채팅 ✅
 
 - `GET /health`: 프로세스와 설정 상태를 확인한다.
-- Bedrock LLM(Amazon Nova Micro)과 mock LLM 서비스를 구현한다.
-- Bedrock 미연결 시 mock 모드로 자동 전환한다.
-- `POST /v1/sources`, `POST /v1/ingestion-jobs`, `GET /v1/ingestion-jobs/{job_id}`: mock 스캐폴딩.
+- Bedrock LLM(Amazon Nova Lite)을 구현한다.
+- Bedrock 미연결 시 mock으로 전환하지 않고 오류로 드러낸다.
+- `POST /v1/sources`, `POST /v1/ingestion-jobs`, `GET /v1/ingestion-jobs/{job_id}`: DB 영속 API.
 - 과거 공개 API였던 `POST /v1/chat`, `POST /v1/chat/stream`은 세션 기반 API 전환 후 제거했다.
 
 ## Phase 2. DB 연결 + 채팅 히스토리
@@ -32,15 +32,16 @@
 - ai-server가 히스토리를 직접 DB에서 조회/저장하도록 변경한다. → 완료
 - 실제 FastAPI 호출로 세션 생성, non-streaming 메시지 저장, SSE 메시지 저장을 검증한다. → 완료
 - 기존 `POST /v1/chat`, `POST /v1/chat/stream`은 세션 기반 API로 대체하고 제거한다. → 완료
-- 파일 업로드 API는 이번 구현 범위에서 스킵한다.
+- 파일 업로드 API는 DB metadata, S3 저장, 권한 검증까지 구현했다.
 
 ## Phase 2-후속. 파일 관리
 
 - `user_files` 모델을 만든다.
 - `POST /v1/files/upload`: 파일 업로드 (채팅 첨부 또는 RAG 소스).
 - `GET /v1/files/{file_id}`: 파일 메타데이터 조회.
-- MVP에서는 Docker Volume에, 운영에서는 S3에 파일을 저장한다.
+- 파일 저장소는 로컬/운영 모두 S3만 사용한다.
 - 세션 메시지 API의 `file_ids`를 실제 파일 context 주입 로직과 연결한다.
+위 항목 중 S3 파일 관리와 텍스트/이미지/문서 채팅 context 주입은 완료했다.
 
 ## Phase 3. RAG (pgvector)
 
@@ -66,5 +67,5 @@
 - retrieval filter에 team ID를 강제한다.
 - prompt injection 방어용 system prompt 정책을 추가한다.
 - Docker image를 ECR에 push하고 EC2에 배포한다.
-- EC2 루트 compose에서는 backend, ai-server, PostgreSQL 16 + pgvector, uploads volume을 함께 올린다.
+- EC2 루트 compose에서는 backend, ai-server, PostgreSQL 16 + pgvector를 함께 올리고 파일 본문은 S3에 저장한다.
 - DB 계정은 가능하면 `backend_user`, `ai_user`로 분리하고 각 schema 권한만 부여한다.

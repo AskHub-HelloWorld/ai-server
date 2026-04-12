@@ -1,4 +1,6 @@
+from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -7,17 +9,16 @@ IngestionJobStatus = Literal["queued", "running", "succeeded", "failed"]
 
 
 class IngestionJobCreateRequest(BaseModel):
-    source_id: str
+    source_id: UUID
     mode: IngestionMode = "full"
 
 
 class IngestionJobResponse(BaseModel):
-    job_id: str
-    source_id: str
+    job_id: UUID
+    source_id: UUID
     mode: IngestionMode
     status: IngestionJobStatus
     indexed_object_count: int
     failure_reason: str | None = None
-    created_at: str
-    updated_at: str
-
+    created_at: datetime
+    updated_at: datetime

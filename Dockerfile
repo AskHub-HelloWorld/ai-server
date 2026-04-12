@@ -7,6 +7,8 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src ./src
+COPY alembic ./alembic
+COPY alembic.ini ./
 
 FROM base AS dev
 

@@ -2,8 +2,8 @@
 
 ## 문서 상태
 
-- 상태: 2차 초안
-- 최종 수정: 2026-04-07
+- 상태: 3차 초안
+- 최종 수정: 2026-04-12
 - 목적: backend/frontend와 ai-server 사이의 연동 계약을 정의한다.
 
 ## 연동 방향
@@ -16,7 +16,7 @@ MVP에서는 `frontend -> backend -> ai-server` 흐름을 기본으로 한다.
 - ai-server는 RAG 검색(pgvector)과 Bedrock LLM 호출을 수행하여 답변을 생성한다.
 - backend와 ai-server는 같은 PostgreSQL 인스턴스를 사용할 수 있지만, backend는 `backend` schema, ai-server는 `ai` schema만 소유한다.
 
-주의: 운영 환경에서 브라우저가 `user_id`, `team_id`를 직접 ai-server에 넘기는 구조는 신뢰할 수 없다. 직접 호출 구조가 필요하면 backend가 발급한 짧은 TTL의 서명 토큰을 사용해야 한다.
+주의: 브라우저가 `user_id`, `team_id`를 직접 ai-server에 넘기는 구조는 신뢰하지 않는다. ai-server는 backend가 서명한 service-to-service 헤더의 사용자/팀 context만 사용한다.
 
 ## 공통 DB 소유권
 
@@ -32,7 +32,7 @@ schema: ai       -> ai-server 소유
 
 - ai-server API는 `ai.chat_sessions`, `ai.messages`, `ai.user_files`, `ai.rag_sources`, `ai.document_chunks`, `ai.ingestion_jobs`만 write한다.
 - backend API는 `backend.users`, `backend.teams`, `backend.posts`, `backend.comments`, `backend.points` 등 backend 도메인 테이블만 write한다.
-- ai-server 요청의 `user_id`, `team_id`는 backend가 검증한 값을 전달받아 저장한다.
+- ai-server 요청의 `user_id`, `team_id`는 backend가 검증한 뒤 서명 헤더로 전달한 값을 저장한다.
 - MVP에서는 ai-server 테이블에서 backend 테이블로 강한 FK를 걸지 않는다.
 - 강한 FK 대신 backend 인증 context와 service-to-service 인증을 신뢰 경계로 사용한다.
 
@@ -41,7 +41,27 @@ schema: ai       -> ai-server 소유
 - 요청/응답 본문은 JSON을 사용한다.
 - 기본 언어는 한국어다.
 - 모든 시간은 ISO 8601 문자열을 사용한다.
-- 운영 환경에서는 backend와 ai-server 사이에 service-to-service 인증을 둔다.
+- backend와 ai-server 사이에는 service-to-service 인증을 둔다.
+
+## Service-to-service 인증
+
+도메인 API는 아래 헤더를 요구한다. `GET /health`, `GET /ready`는 예외다.
+
+- `X-AskHub-User-Id`: backend가 검증한 사용자 ID.
+- `X-AskHub-Team-Id`: backend가 검증한 팀 ID. 팀 context가 없는 요청에서는 생략 가능하다.
+- `X-AskHub-Timestamp`: Unix epoch seconds.
+- `X-AskHub-Signature`: `SERVICE_AUTH_SECRET`으로 생성한 HMAC-SHA256 hex digest.
+
+서명 payload는 아래 줄바꿈 구분 문자열이다.
+
+```text
+{timestamp}
+{HTTP_METHOD}
+{request_path}
+{query_string}
+{user_id}
+{team_id_or_empty_string}
+```
 
 ---
 
@@ -62,6 +82,10 @@ ai-server 프로세스 상태를 확인한다.
 }
 ```
 
+### `GET /ready`
+
+DB 연결, service auth 설정, Bedrock 필수 설정을 확인한다.
+
 ## 세션 기반 채팅 API
 
 ai-server가 `ai.chat_sessions`, `ai.messages` 테이블을 사용해 세션과 메시지 히스토리를 직접 관리한다. 공개 채팅 API는 세션 기반 endpoint만 사용한다.
@@ -80,10 +104,7 @@ ai-server가 `ai.chat_sessions`, `ai.messages` 테이블을 사용해 세션과 
 요청 예시:
 
 ```json
-{
-  "user_id": 1,
-  "team_id": 10
-}
+{}
 ```
 
 응답 예시:
@@ -104,8 +125,7 @@ ai-server가 `ai.chat_sessions`, `ai.messages` 테이블을 사용해 세션과 
 
 쿼리 파라미터:
 
-- `user_id` (필수): 사용자 ID.
-- `team_id` (선택): 팀 ID.
+- `team_id` (선택): 헤더의 팀 context와 일치해야 한다.
 
 응답 예시:
 
@@ -196,15 +216,16 @@ ai-server는 streaming 시작 전에 user 메시지를 저장하고, `done` 이�
 
 - user 메시지 저장
 - DB에서 이전 history 조회
-- Bedrock 또는 mock LLM 호출
+- Bedrock LLM 호출
 - assistant 메시지 저장
-- `file_ids` 필드는 요청 스키마에 포함되어 있으나 이번 범위에서는 사용하지 않는다.
+- `file_ids`로 전달한 소유 파일 중 텍스트는 UTF-8 context로, PNG/JPEG 이미지는 Bedrock image content block으로 LLM 입력에 반영한다.
+- 그 외 binary 파일은 업로드/첨부 자체를 차단하지 않고 파일 metadata를 LLM context에 전달한다. 원문 추출은 RAG ingestion 단계에서 별도 parser/OCR로 확장한다.
 
-## RAG/인덱싱 mock API
+## RAG/인덱싱 API
 
-### `POST /v1/sources` (현재 mock)
+### `POST /v1/sources`
 
-문서 또는 레포지토리 소스 메타데이터를 등록한다. 현재는 in-memory 저장소에만 저장한다.
+문서 또는 레포지토리 소스 메타데이터를 `ai.rag_sources`에 등록한다. 팀 ID는 service-to-service 헤더의 팀 context를 사용한다.
 
 요청 예시:
 
@@ -213,51 +234,55 @@ ai-server는 streaming 시작 전에 user 메시지를 저장하고, `done` 이�
   "source_type": "repository",
   "name": "backend",
   "repo_url": "https://github.com/AskHub-HelloWorld/backend.git",
-  "team_id": 10,
   "default_branch": "main"
 }
 ```
 
-### `POST /v1/ingestion-jobs` (현재 mock)
+### `POST /v1/ingestion-jobs`
 
-등록된 source를 기준으로 인덱싱 작업을 생성한다. 현재는 in-memory job을 `queued` 상태로 만든다.
+등록된 source를 기준으로 `ai.ingestion_jobs`에 `queued` 작업을 생성한다.
 
-### `GET /v1/ingestion-jobs/{job_id}` (현재 mock)
+### `GET /v1/ingestion-jobs/{job_id}`
 
 인덱싱 작업 상태를 조회한다.
 
-## 보류한 API
+## 파일 API
 
 ### `POST /v1/files/upload`
 
 파일을 업로드한다. multipart/form-data를 사용한다.
 
-이번 구현 범위에서는 파일 업로드 API를 스킵한다. 이후 `user_files` 모델과 파일 저장소 정책이 확정되면 추가한다.
-
 요청 필드:
 
 - `file` (필수): 업로드할 파일.
-- `user_id` (필수): 사용자 ID.
-- `team_id` (선택): 팀 ID.
+- `session_id` (선택): 채팅 세션 ID. 값이 있으면 헤더 context의 소유 세션이어야 한다.
 - `purpose` (선택): `chat_attachment` (기본값) 또는 `rag_source`.
 
 응답 예시:
 
 ```json
 {
-  "file_id": "660e8400-e29b-41d4-a716-446655440000",
+  "id": "660e8400-e29b-41d4-a716-446655440000",
+  "user_id": 1,
+  "team_id": 10,
+  "session_id": null,
   "filename": "error.log",
   "content_type": "text/plain",
-  "file_size": 2048
+  "file_size": 2048,
+  "purpose": "chat_attachment",
+  "created_at": "2026-04-12T07:00:00Z"
 }
 ```
 
-`purpose=chat_attachment`인 경우 채팅 메시지 전송 시 `file_ids`에 포함하여 LLM context로 활용한다.
-`purpose=rag_source`인 경우 자동으로 ingestion 파이프라인을 트리거하여 벡터 인덱싱한다.
+내부 `storage_path`는 응답하지 않는다. `purpose=chat_attachment`인 파일은 채팅 메시지 전송 시 `file_ids`에 포함하여 LLM context로 활용한다. 업로드 단계에서는 content type으로 차단하지 않고, 채팅 단계에서 텍스트/이미지/기타 binary 파일을 분기 처리한다.
+
+### `GET /v1/files`
+
+헤더 context의 사용자가 업로드한 파일 metadata 목록을 조회한다.
 
 ### `GET /v1/files/{file_id}`
 
-업로드된 파일의 메타데이터를 조회한다.
+헤더 context의 사용자가 소유한 파일 metadata를 조회한다.
 
 ---
 
@@ -275,7 +300,5 @@ ai-server는 게시글을 직접 저장하지 않고, `suggested_post` 초안을
 
 ## 미결정 사항
 
-- backend와 ai-server 사이의 service-to-service 인증 방식.
 - SSE 스트리밍을 backend가 프록시할지, 별도 경로로 처리할지.
-- 파일 용량 제한과 허용 포맷.
 - 팀 간 RAG 소스 공유 정책.

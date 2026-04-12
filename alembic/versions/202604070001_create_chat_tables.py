@@ -1,18 +1,17 @@
 """create ai chat tables"""
 
-import os
-
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from askhub_ai_server.core.config import get_settings
 
 revision = "202604070001"
 down_revision = None
 branch_labels = None
 depends_on = None
 
-SCHEMA = os.getenv("DB_SCHEMA", "ai")
+SCHEMA = get_settings().db_schema
 
 
 def upgrade() -> None:

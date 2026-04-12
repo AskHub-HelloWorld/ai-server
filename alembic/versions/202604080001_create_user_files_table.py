@@ -1,18 +1,17 @@
 """create user_files table"""
 
-import os
-
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
+from askhub_ai_server.core.config import get_settings
 
 revision = "202604080001"
 down_revision = "202604070001"
 branch_labels = None
 depends_on = None
 
-SCHEMA = os.getenv("DB_SCHEMA", "ai")
+SCHEMA = get_settings().db_schema
 
 
 def upgrade() -> None:
@@ -30,7 +29,12 @@ def upgrade() -> None:
         sa.Column("content_type", sa.String(length=100), nullable=True),
         sa.Column("file_size", sa.BigInteger(), nullable=True),
         sa.Column("storage_path", sa.Text(), nullable=False),
-        sa.Column("purpose", sa.String(length=20), nullable=False, server_default="chat_attachment"),
+        sa.Column(
+            "purpose",
+            sa.String(length=20),
+            nullable=False,
+            server_default="chat_attachment",
+        ),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()")),
         sa.CheckConstraint(
             "purpose IN ('chat_attachment', 'rag_source')",

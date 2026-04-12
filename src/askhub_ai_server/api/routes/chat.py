@@ -8,24 +8,23 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from askhub_ai_server.core.config import Settings, get_settings
 from askhub_ai_server.core.database import SessionLocal, get_db
+from askhub_ai_server.core.security import ServiceContext, get_service_context
 from askhub_ai_server.models import ChatSession, Message
-from askhub_ai_server.models.file import UserFile
 from askhub_ai_server.schemas.chat import (
-    ChatRequest,
     ChatSessionCreateRequest,
     ChatSessionDetailResponse,
     ChatSessionListResponse,
     ChatSessionResponse,
-    HistoryMessage,
     MessageResponse,
     SessionMessageRequest,
     SessionMessageResponse,
-    SuggestedPost,
 )
+from askhub_ai_server.services.chat_service import ChatService, LLMRequestError
+from askhub_ai_server.services.exceptions import ServiceError
 from askhub_ai_server.services.llm import get_llm_service
 
 logger = logging.getLogger(__name__)
@@ -48,6 +47,17 @@ def _sse(event: str, data: object) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _get_chat_service(
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ChatService:
+    return ChatService(db=db, settings=settings, llm=get_llm_service())
+
+
+def _http_exception(error: ServiceError) -> HTTPException:
+    return HTTPException(status_code=error.status_code, detail=error.detail)
+
+
 @router.post(
     "/sessions",
     response_model=ChatSessionResponse,
@@ -56,13 +66,10 @@ def _sse(event: str, data: object) -> str:
 )
 def create_chat_session(
     request: ChatSessionCreateRequest,
-    db: Annotated[Session, Depends(get_db)],
+    context: Annotated[ServiceContext, Depends(get_service_context)],
+    service: Annotated[ChatService, Depends(_get_chat_service)],
 ) -> ChatSessionResponse:
-    session = ChatSession(user_id=request.user_id, team_id=request.team_id, title=request.title)
-    db.add(session)
-    db.commit()
-    db.refresh(session)
-    return _session_response(session)
+    return _session_response(service.create_session(context, request.title))
 
 
 @router.get(
@@ -71,16 +78,14 @@ def create_chat_session(
     summary="채팅 세션 목록 조회",
 )
 def list_chat_sessions(
-    user_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    context: Annotated[ServiceContext, Depends(get_service_context)],
+    service: Annotated[ChatService, Depends(_get_chat_service)],
     team_id: int | None = None,
 ) -> ChatSessionListResponse:
-    statement = select(ChatSession).where(ChatSession.user_id == user_id)
-    if team_id is not None:
-        statement = statement.where(ChatSession.team_id == team_id)
-    statement = statement.order_by(ChatSession.updated_at.desc(), ChatSession.created_at.desc())
-
-    sessions = db.scalars(statement).all()
+    try:
+        sessions = service.list_sessions(context, team_id)
+    except ServiceError as exc:
+        raise _http_exception(exc) from exc
     return ChatSessionListResponse(sessions=[_session_response(session) for session in sessions])
 
 
@@ -91,14 +96,13 @@ def list_chat_sessions(
 )
 def get_chat_session(
     session_id: UUID,
-    db: Annotated[Session, Depends(get_db)],
+    context: Annotated[ServiceContext, Depends(get_service_context)],
+    service: Annotated[ChatService, Depends(_get_chat_service)],
 ) -> ChatSessionDetailResponse:
-    session = _get_session_or_404(db, session_id)
-    messages = db.scalars(
-        select(Message)
-        .where(Message.session_id == session.id)
-        .order_by(Message.created_at.asc(), Message.id.asc())
-    ).all()
+    try:
+        session, messages = service.get_session_detail(session_id, context)
+    except ServiceError as exc:
+        raise _http_exception(exc) from exc
     return ChatSessionDetailResponse(
         **_session_response(session).model_dump(),
         messages=[_message_response(message) for message in messages],
@@ -113,42 +117,26 @@ def get_chat_session(
 def create_session_message(
     session_id: UUID,
     request: SessionMessageRequest,
-    db: Annotated[Session, Depends(get_db)],
+    context: Annotated[ServiceContext, Depends(get_service_context)],
+    service: Annotated[ChatService, Depends(_get_chat_service)],
 ) -> SessionMessageResponse:
-    session = _get_session_or_404(db, session_id)
-    user_message = _save_user_message(db, session, request.message)
-    history = _load_history(db, session.id, exclude_message_id=user_message.id)
-
-    file_context = _load_file_context(db, request.file_ids)
-    llm_message = f"{file_context}\n\n{request.message}" if file_context else request.message
-    chat_request = _build_chat_request(session, llm_message, history)
-
-    llm = get_llm_service()
     try:
-        answer = llm.converse(chat_request)
-        answerable = True
-        suggested_post = None
-    except Exception:
-        logger.exception("세션 메시지 LLM 호출 실패")
-        answer = "AI 응답 생성에 실패했습니다. 잠시 후 다시 시도해주세요."
-        answerable = False
-        suggested_post = _suggested_post(request.message)
-
-    assistant_message = _save_assistant_message(
-        db=db,
-        session=session,
-        content=answer,
-        answerable=answerable,
-        citations=[],
-    )
+        result = service.create_message(session_id, request, context)
+    except ServiceError as exc:
+        raise _http_exception(exc) from exc
+    except LLMRequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="LLM request failed",
+        ) from exc
     return SessionMessageResponse(
-        session_id=session.id,
-        user_message_id=user_message.id,
-        assistant_message_id=assistant_message.id,
-        answer=answer,
-        answerable=answerable,
-        citations=[],
-        suggested_post=suggested_post,
+        session_id=result.session_id,
+        user_message_id=result.user_message_id,
+        assistant_message_id=result.assistant_message_id,
+        answer=result.answer,
+        answerable=result.answerable,
+        citations=result.citations,
+        suggested_post=None,
     )
 
 
@@ -170,127 +158,67 @@ def create_session_message(
 def stream_session_message(
     session_id: UUID,
     request: SessionMessageRequest,
-    db: Annotated[Session, Depends(get_db)],
+    context: Annotated[ServiceContext, Depends(get_service_context)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    service: Annotated[ChatService, Depends(_get_chat_service)],
 ) -> StreamingResponse:
-    session = _get_session_or_404(db, session_id)
-    user_message = _save_user_message(db, session, request.message)
-    history = _load_history(db, session.id, exclude_message_id=user_message.id)
-
-    file_context = _load_file_context(db, request.file_ids)
-    llm_message = f"{file_context}\n\n{request.message}" if file_context else request.message
-    chat_request = _build_chat_request(session, llm_message, history)
+    try:
+        prepared = service.prepare_message(session_id, request, context)
+    except ServiceError as exc:
+        raise _http_exception(exc) from exc
 
     def event_stream() -> Iterator[str]:
         yield _sse(
             "metadata",
-            {"session_id": str(session.id), "user_message_id": str(user_message.id)},
+            {
+                "session_id": str(prepared.session_id),
+                "user_message_id": str(prepared.user_message_id),
+            },
         )
 
         full_response = ""
         answerable = True
         try:
-            for delta in get_llm_service().converse_stream(chat_request):
+            for delta in get_llm_service().converse_stream(prepared.chat_request):
                 full_response += delta
                 yield _sse("token", {"delta": delta})
         except Exception:
             logger.exception("세션 메시지 LLM 스트리밍 실패")
-            answerable = False
-            full_response = "AI 응답 생성 중 오류가 발생했습니다."
-            yield _sse("error", {"message": full_response})
+            yield _sse("error", {"message": "LLM request failed"})
+            return
 
         with SessionLocal() as streaming_db:
-            streaming_session = _get_session_or_404(streaming_db, session.id)
-            assistant_message = _save_assistant_message(
+            streaming_service = ChatService(
                 db=streaming_db,
-                session=streaming_session,
-                content=full_response,
-                answerable=answerable,
-                citations=[],
+                settings=settings,
+                llm=get_llm_service(),
             )
+            try:
+                result = streaming_service.complete_message(
+                    session_id=prepared.session_id,
+                    user_message_id=prepared.user_message_id,
+                    context=context,
+                    answer=full_response,
+                    answerable=answerable,
+                    citations=[],
+                )
+            except ServiceError:
+                logger.exception("세션 메시지 스트리밍 저장 실패")
+                yield _sse("error", {"message": "message persistence failed"})
+                return
 
         yield _sse(
             "done",
             {
-                "session_id": str(session.id),
-                "user_message_id": str(user_message.id),
-                "assistant_message_id": str(assistant_message.id),
+                "session_id": str(result.session_id),
+                "user_message_id": str(result.user_message_id),
+                "assistant_message_id": str(result.assistant_message_id),
                 "full_response": full_response,
                 "answerable": answerable,
             },
         )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-
-def _get_session_or_404(db: Session, session_id: UUID) -> ChatSession:
-    session = db.get(ChatSession, session_id)
-    if session is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"chat session not found: {session_id}",
-        )
-    return session
-
-
-def _save_user_message(db: Session, session: ChatSession, content: str) -> Message:
-    message = Message(session_id=session.id, role="user", content=content)
-    if session.title is None:
-        session.title = _build_session_title(content)
-    db.add(message)
-    db.commit()
-    db.refresh(message)
-    db.refresh(session)
-    return message
-
-
-def _save_assistant_message(
-    db: Session,
-    session: ChatSession,
-    content: str,
-    answerable: bool,
-    citations: list[dict],
-) -> Message:
-    message = Message(
-        session_id=session.id,
-        role="assistant",
-        content=content,
-        answerable=answerable,
-        citations=citations,
-    )
-    db.add(message)
-    db.commit()
-    db.refresh(message)
-    return message
-
-
-def _load_history(
-    db: Session,
-    session_id: UUID,
-    exclude_message_id: UUID | None = None,
-) -> list[HistoryMessage]:
-    statement = select(Message).where(Message.session_id == session_id)
-    if exclude_message_id is not None:
-        statement = statement.where(Message.id != exclude_message_id)
-    statement = statement.order_by(Message.created_at.asc(), Message.id.asc())
-
-    return [
-        HistoryMessage(role=message.role, content=message.content)
-        for message in db.scalars(statement).all()
-    ]
-
-
-def _build_chat_request(
-    session: ChatSession,
-    message: str,
-    history: list[HistoryMessage],
-) -> ChatRequest:
-    return ChatRequest(
-        message=message,
-        user_id=session.user_id,
-        team_id=session.team_id,
-        session_id=str(session.id),
-        history=history,
-    )
 
 
 def _session_response(session: ChatSession) -> ChatSessionResponse:
@@ -313,38 +241,3 @@ def _message_response(message: Message) -> MessageResponse:
         citations=message.citations or [],
         created_at=message.created_at,
     )
-
-
-def _suggested_post(message: str) -> SuggestedPost:
-    return SuggestedPost(
-        title=f"AI가 답변하지 못한 질문: {message[:40]}",
-        body=message,
-        tags=["ai-fallback", "needs-human-answer"],
-    )
-
-
-def _build_session_title(message: str) -> str:
-    title = message.strip().replace("\n", " ")
-    return title[:60] if title else "새 채팅"
-
-
-MAX_FILE_CONTENT_SIZE = 50 * 1024  # 50 KB per file
-
-
-def _load_file_context(db: Session, file_ids: list[UUID]) -> str:
-    """첨부 파일의 내용을 읽어 LLM context 문자열로 반환한다."""
-    if not file_ids:
-        return ""
-    parts: list[str] = []
-    for fid in file_ids:
-        user_file = db.get(UserFile, fid)
-        if user_file is None:
-            logger.warning("첨부 파일을 찾을 수 없음: %s", fid)
-            continue
-        try:
-            with open(user_file.storage_path, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read(MAX_FILE_CONTENT_SIZE)
-            parts.append(f"[첨부 파일: {user_file.filename}]\n{content}")
-        except Exception:
-            logger.warning("파일 읽기 실패: %s", user_file.storage_path)
-    return "\n\n".join(parts)

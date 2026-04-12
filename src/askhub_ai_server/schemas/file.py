@@ -17,7 +17,6 @@ class FileUploadResponse(BaseModel):
     filename: str
     content_type: str | None = None
     file_size: int | None = None
-    storage_path: str
     purpose: Literal["chat_attachment", "rag_source"]
     created_at: datetime
 

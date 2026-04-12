@@ -16,6 +16,14 @@ class HistoryMessage(BaseModel):
     content: str = Field(description="메시지 내용")
 
 
+class ChatAttachment(BaseModel):
+    """LLM 호출에 전달할 채팅 첨부 파일."""
+
+    filename: str = Field(description="사용자가 업로드한 원본 파일명")
+    content_type: str = Field(description="정규화된 MIME content type")
+    data: bytes = Field(description="첨부 파일 bytes")
+
+
 class ChatRequest(BaseModel):
     """세션 API가 LLM 서비스로 전달하는 내부 채팅 요청."""
 
@@ -41,6 +49,10 @@ class ChatRequest(BaseModel):
     history: list[HistoryMessage] = Field(
         default_factory=list,
         description="ai-server가 ai.messages 테이블에서 조회한 이전 대화 히스토리",
+    )
+    attachments: list[ChatAttachment] = Field(
+        default_factory=list,
+        description="현재 사용자 메시지에 첨부된 LLM 입력 파일",
     )
 
 
@@ -90,8 +102,6 @@ class ChatResponse(BaseModel):
 class ChatSessionCreateRequest(BaseModel):
     """ai-server가 직접 관리하는 채팅 세션 생성 요청."""
 
-    user_id: int = Field(description="Backend에서 검증한 사용자 ID")
-    team_id: int | None = Field(default=None, description="Backend에서 검증한 팀 ID")
     title: str | None = Field(default=None, max_length=200, description="선택 세션 제목")
 
 

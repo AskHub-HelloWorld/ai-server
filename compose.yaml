@@ -11,54 +11,57 @@ services:
       - .env
     environment:
       PYTHONPATH: /app/src
-      DATABASE_URL: postgresql+psycopg://askhub:${DB_PASSWORD:-askhub}@postgres:5432/askhub
-      DB_SCHEMA: ai
-      UPLOAD_DIR: /app/uploads
+      DB_SCHEMA: ${DB_SCHEMA:?DB_SCHEMA is required}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@${POSTGRES_HOST:?POSTGRES_HOST is required}:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      SERVICE_AUTH_ENABLED: "true"
+      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?SERVICE_AUTH_SECRET is required}
     volumes:
       - .:/app
-      - uploads:/app/uploads
-    depends_on:
-      postgres:
-        condition: service_healthy
+    networks:
+      - askhub
 
-  worker:
+  api-test:
     build:
       context: .
       target: dev
     image: askhub-ai-server:dev
-    command: python -m askhub_ai_server.worker
-    profiles:
-      - worker
+    command: pytest
     env_file:
       - .env
     environment:
       PYTHONPATH: /app/src
-      DATABASE_URL: postgresql+psycopg://askhub:${DB_PASSWORD:-askhub}@postgres:5432/askhub
-      DB_SCHEMA: ai
-      UPLOAD_DIR: /app/uploads
+      APP_ENV: test
+      DB_SCHEMA: ${TEST_DB_SCHEMA:?TEST_DB_SCHEMA is required}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@${POSTGRES_HOST:?POSTGRES_HOST is required}:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      SERVICE_AUTH_ENABLED: "true"
+      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?SERVICE_AUTH_SECRET is required}
     volumes:
       - .:/app
-      - uploads:/app/uploads
-    depends_on:
-      postgres:
-        condition: service_healthy
+    networks:
+      - askhub
 
-  postgres:
-    image: pgvector/pgvector:pg16
+  migrate:
+    build:
+      context: .
+      target: dev
+    image: askhub-ai-server:dev
+    command: alembic upgrade head
+    profiles:
+      - tools
+    env_file:
+      - .env
     environment:
-      POSTGRES_USER: askhub
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-askhub}
-      POSTGRES_DB: askhub
-    ports:
-      - "5432:5432"
+      PYTHONPATH: /app/src
+      DB_SCHEMA: ${DB_SCHEMA:?DB_SCHEMA is required}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@${POSTGRES_HOST:?POSTGRES_HOST is required}:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      SERVICE_AUTH_ENABLED: "true"
+      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?SERVICE_AUTH_SECRET is required}
     volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U askhub -d askhub"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      - .:/app
+    networks:
+      - askhub
 
-volumes:
-  pgdata:
-  uploads:
+networks:
+  askhub:
+    external: true
+    name: ${ASKHUB_DOCKER_NETWORK:?ASKHUB_DOCKER_NETWORK is required}

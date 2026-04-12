@@ -12,14 +12,35 @@ class Settings(BaseSettings):
 
     # AWS Bedrock
     aws_region: str = "ap-southeast-2"
-    aws_bearer_token_bedrock: str = ""
-    bedrock_model_id: str = "amazon.nova-micro-v1:0"
-    use_bedrock: bool = False  # EC2 IAM Role 환경에서 True로 설정
+    bedrock_model_id: str = "amazon.nova-lite-v1:0"
 
     # Database and file storage
-    database_url: str = "postgresql+psycopg://askhub:askhub@postgres:5432/askhub"
+    database_url: str
     db_schema: str = "ai"
-    upload_dir: str = "/app/uploads"
+    file_storage_backend: str = "s3"
+    s3_bucket: str = ""
+    s3_region: str = "ap-northeast-2"
+    s3_prefix: str = "ai-server/user-files"
+    max_upload_bytes: int = 10 * 1024 * 1024
+    max_file_context_bytes: int = 50 * 1024
+    max_files_per_message: int = 5
+    allowed_upload_content_types_raw: str = Field(
+        default=(
+            "text/plain,text/markdown,application/json,application/xml,text/csv,"
+            "image/png,image/jpeg,image/jpg,image/gif,image/webp,"
+            "application/pdf,"
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document,"
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,"
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        ),
+        alias="ALLOWED_UPLOAD_CONTENT_TYPES",
+    )
+    max_history_messages: int = 20
+
+    # Service-to-service authentication. Backend must sign requests to ai-server.
+    service_auth_enabled: bool = True
+    service_auth_secret: str = ""
+    service_auth_timestamp_tolerance_seconds: int = 300
 
     backend_base_url: str = "http://localhost:8080"
     allowed_origins_raw: str = Field(default="", alias="ALLOWED_ORIGINS")
@@ -33,8 +54,12 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.allowed_origins_raw.split(",") if origin.strip()]
 
     @property
-    def bedrock_available(self) -> bool:
-        return self.use_bedrock or bool(self.aws_bearer_token_bedrock)
+    def allowed_upload_content_types(self) -> set[str]:
+        return {
+            content_type.strip().lower()
+            for content_type in self.allowed_upload_content_types_raw.split(",")
+            if content_type.strip()
+        }
 
 
 @lru_cache(maxsize=1)

@@ -1,4 +1,6 @@
+from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -8,7 +10,6 @@ SourceType = Literal["repository", "document"]
 class SourceCreateRequest(BaseModel):
     source_type: SourceType
     name: str = Field(min_length=1, max_length=200)
-    team_id: int
     repo_url: str | None = None
     default_branch: str | None = None
     url: str | None = None
@@ -23,7 +24,7 @@ class SourceCreateRequest(BaseModel):
 
 
 class SourceResponse(BaseModel):
-    source_id: str
+    source_id: UUID
     source_type: SourceType
     name: str
     team_id: int
@@ -31,5 +32,4 @@ class SourceResponse(BaseModel):
     repo_url: str | None = None
     default_branch: str | None = None
     url: str | None = None
-    created_at: str
-
+    created_at: datetime

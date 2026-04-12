@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AskHub AI Chat Test</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex/dist/katex.min.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="채팅 도구">
+        <div class="rail-top">
+          <button class="rail-logo" type="button" aria-label="AskHub AI">
+            <span class="rail-mark" aria-hidden="true">AH</span>
+          </button>
+          <button id="newChatButton" class="rail-button" type="button" aria-label="새 채팅">＋</button>
+          <button id="refreshSessionsButton" class="rail-button" type="button" aria-label="세션 새로고침">
+            ↻
+          </button>
+          <button id="healthCheckButton" class="rail-button" type="button" aria-label="연결 확인">
+            i
+          </button>
+        </div>
+
+        <details class="settings-panel">
+          <summary aria-label="테스트 설정">AH</summary>
+          <div class="settings-content">
+            <label>
+              User ID
+              <input id="userIdInput" type="number" value="1" min="1" inputmode="numeric" />
+            </label>
+            <label>
+              Team ID
+              <input id="teamIdInput" type="number" value="10" min="1" inputmode="numeric" />
+            </label>
+            <p class="settings-note">dev proxy에서 인증 서명을 생성합니다.</p>
+            <nav id="sessionList" class="session-list" aria-label="채팅 목록"></nav>
+          </div>
+        </details>
+      </aside>
+
+      <main class="chat-main">
+        <header class="topbar">
+          <span class="model-label">AskHub AI</span>
+          <span id="sessionTitle" class="visually-hidden">새 채팅</span>
+          <div class="topbar-actions">
+            <div id="connectionStatus" class="status-pill" role="status">대기 중</div>
+          </div>
+        </header>
+
+        <section id="messages" class="messages" aria-live="polite">
+          <div class="empty-state">
+            <h1>무엇을 도와드릴까요?</h1>
+          </div>
+        </section>
+
+        <section class="composer" aria-label="메시지 작성">
+          <div class="composer-row">
+            <div id="attachedFiles" class="attached-files" aria-live="polite"></div>
+            <textarea
+              id="messageInput"
+              rows="1"
+              placeholder="무엇이든 물어보세요"
+              aria-label="질문 입력"
+            ></textarea>
+            <div class="composer-toolbar">
+              <div class="composer-tools-left">
+                <label class="attach-button" for="fileInput" aria-label="파일 첨부">＋</label>
+                <input id="fileInput" class="file-input" type="file" multiple />
+              </div>
+              <div class="composer-tools-right">
+                <button id="sendButton" class="send-button" type="button" aria-label="메시지 전송">↑</button>
+              </div>
+            </div>
+          </div>
+          <p class="composer-hint">
+            AskHub AI는 실수를 할 수 있습니다. 중요한 정보는 재차 확인하세요.
+          </p>
+        </section>
+      </main>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/katex/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="./app.js" defer></script>
+  </body>
+</html>

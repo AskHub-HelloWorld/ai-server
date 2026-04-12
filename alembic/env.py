@@ -1,6 +1,6 @@
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 
 from alembic import context
 from askhub_ai_server import models  # noqa: F401
@@ -24,6 +24,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         include_schemas=True,
+        version_table_schema=settings.db_schema,
     )
 
     with context.begin_transaction():
@@ -38,10 +39,13 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{settings.db_schema}"'))
+        connection.commit()
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
             include_schemas=True,
+            version_table_schema=settings.db_schema,
         )
 
         with context.begin_transaction():
@@ -52,4 +56,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-

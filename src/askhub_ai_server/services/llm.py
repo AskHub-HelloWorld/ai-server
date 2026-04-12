@@ -1,16 +1,16 @@
-"""Bedrock LLM 서비스 — ConverseStream API로 Amazon Nova Micro 호출."""
+"""Bedrock LLM 서비스 — Converse API로 Amazon Nova Lite 호출."""
 
 from __future__ import annotations
 
 import logging
-import time
+import re
 from collections.abc import Generator
 
 import boto3
 from botocore.config import Config as BotoConfig
 
 from askhub_ai_server.core.config import Settings, get_settings
-from askhub_ai_server.schemas.chat import ChatRequest
+from askhub_ai_server.schemas.chat import ChatAttachment, ChatRequest
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,24 @@ SYSTEM_PROMPT = (
     "회사 개발자들의 기술 질문에 친절하고 정확하게 답변합니다.\n"
     "한국어로 답변하세요."
 )
+
+IMAGE_CONTENT_TYPE_TO_BEDROCK_FORMAT = {
+    "image/png": "png",
+    "image/jpeg": "jpeg",
+    "image/jpg": "jpeg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+}
+
+DOCUMENT_CONTENT_TYPE_TO_FORMAT = {
+    "application/pdf": "pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "text/csv": "csv",
+    "text/html": "html",
+}
+
+_DOCUMENT_NAME_RE = re.compile(r"[^a-zA-Z0-9\s\-\(\)\[\]]")
 
 
 class BedrockLLMService:
@@ -36,11 +54,7 @@ class BedrockLLMService:
         )
 
     def _build_messages(self, request: ChatRequest) -> list[dict]:
-        messages: list[dict] = []
-        for h in request.history:
-            messages.append({"role": h.role, "content": [{"text": h.content}]})
-        messages.append({"role": "user", "content": [{"text": request.message}]})
-        return messages
+        return build_converse_messages(request)
 
     def converse(self, request: ChatRequest) -> str:
         """Non-streaming 호출. 전체 응답 텍스트를 반환."""
@@ -49,7 +63,7 @@ class BedrockLLMService:
             messages=self._build_messages(request),
             system=[{"text": SYSTEM_PROMPT}],
         )
-        return response["output"]["message"]["content"][0]["text"]
+        return _extract_text_response(response)
 
     def converse_stream(self, request: ChatRequest) -> Generator[str, None, None]:
         """Streaming 호출. 토큰(텍스트 조각)을 하나씩 yield."""
@@ -65,43 +79,65 @@ class BedrockLLMService:
                     yield text
 
 
-class MockLLMService:
-    """Bedrock 미연결 시 사용하는 mock LLM. 토큰 단위로 시뮬레이션."""
+def build_converse_messages(request: ChatRequest) -> list[dict]:
+    messages: list[dict] = []
+    for h in request.history:
+        messages.append({"role": h.role, "content": [{"text": h.content}]})
 
-    _MOCK_ANSWER = (
-        "안녕하세요! AskHub AI 어시스턴트입니다. "
-        "현재 Bedrock LLM이 연결되지 않아 mock 모드로 동작 중입니다. "
-        "AWS 자격 증명을 설정하면 실제 AI 응답을 받을 수 있습니다."
-    )
+    current_content: list[dict] = []
+    for attachment in request.attachments:
+        block = _build_image_content_block(attachment)
+        if block is None:
+            block = _build_document_content_block(attachment)
+        if block is not None:
+            current_content.append(block)
+    current_content.append({"text": request.message})
+    messages.append({"role": "user", "content": current_content})
+    return messages
 
-    def converse(self, request: ChatRequest) -> str:
-        return self._MOCK_ANSWER
 
-    def converse_stream(self, request: ChatRequest) -> Generator[str, None, None]:
-        for word in self._MOCK_ANSWER.split(" "):
-            yield word + " "
-            time.sleep(0.05)
+def _build_image_content_block(attachment: ChatAttachment) -> dict | None:
+    image_format = IMAGE_CONTENT_TYPE_TO_BEDROCK_FORMAT.get(attachment.content_type)
+    if image_format is None:
+        return None
+    return {
+        "image": {
+            "format": image_format,
+            "source": {"bytes": attachment.data},
+        }
+    }
+
+
+def _build_document_content_block(attachment: ChatAttachment) -> dict | None:
+    doc_format = DOCUMENT_CONTENT_TYPE_TO_FORMAT.get(attachment.content_type)
+    if doc_format is None:
+        return None
+    name = _DOCUMENT_NAME_RE.sub("", attachment.filename)[:100].strip() or "document"
+    return {
+        "document": {
+            "format": doc_format,
+            "name": name,
+            "source": {"bytes": attachment.data},
+        }
+    }
+
+
+def _extract_text_response(response: dict) -> str:
+    content_blocks = response["output"]["message"].get("content", [])
+    return "".join(block.get("text", "") for block in content_blocks)
 
 
 # --- singleton ---
 
-_service: BedrockLLMService | MockLLMService | None = None
+_service: BedrockLLMService | None = None
 
 
-def get_llm_service() -> BedrockLLMService | MockLLMService:
+def get_llm_service() -> BedrockLLMService:
     global _service  # noqa: PLW0603
     if _service is not None:
         return _service
 
     settings = get_settings()
-    if settings.bedrock_available:
-        try:
-            _service = BedrockLLMService(settings)
-            logger.info("Bedrock LLM 서비스 초기화 완료 (model=%s)", settings.bedrock_model_id)
-        except Exception:
-            logger.warning("Bedrock 클라이언트 생성 실패 — mock 모드로 전환", exc_info=True)
-            _service = MockLLMService()
-    else:
-        logger.info("AWS_BEARER_TOKEN_BEDROCK 미설정 — mock 모드로 동작")
-        _service = MockLLMService()
+    _service = BedrockLLMService(settings)
+    logger.info("Bedrock LLM 서비스 초기화 완료 (model=%s)", settings.bedrock_model_id)
     return _service

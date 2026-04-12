@@ -1,0 +1,15 @@
+services:
+  chatbot-test-ui:
+    build:
+      context: .
+    image: askhub-chatbot-test-ui:dev
+    container_name: askhub-chatbot-test-ui
+    environment:
+      AI_SERVER_BASE_URL: ${AI_SERVER_BASE_URL:-http://host.docker.internal:8000}
+      PORT: "8080"
+      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?SERVICE_AUTH_SECRET is required}
+    ports:
+      - "${CHATBOT_TEST_UI_PORT:-5173}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
@@ -11,6 +12,9 @@ from askhub_ai_server.core.config import get_settings
 from askhub_ai_server.core.database import Base
 
 DB_SCHEMA = get_settings().db_schema
+
+if TYPE_CHECKING:
+    from askhub_ai_server.models.chat import ChatSession
 
 
 class UserFile(Base):
@@ -28,6 +32,9 @@ class UserFile(Base):
     content_type: Mapped[str | None] = mapped_column(String(100))
     file_size: Mapped[int | None] = mapped_column(BigInteger)
     storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    storage_provider: Mapped[str] = mapped_column(String(20), nullable=False, default="local")
+    storage_bucket: Mapped[str | None] = mapped_column(String(255))
+    storage_key: Mapped[str | None] = mapped_column(Text)
     purpose: Mapped[str] = mapped_column(String(20), nullable=False, default="chat_attachment")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -35,4 +42,4 @@ class UserFile(Base):
         nullable=False,
     )
 
-    session: Mapped["ChatSession | None"] = relationship()  # noqa: F821
+    session: Mapped[ChatSession | None] = relationship()

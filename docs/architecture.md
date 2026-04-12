@@ -56,14 +56,10 @@ MVP에서는 EC2 한 대에 Docker Compose로 전체 서비스를 올린다.
 │  │ :8080    │ │ :8000    │ │ + pgvector │ │
 │  └──────────┘ └──────────┘ │ :5432      │ │
 │                             └────────────┘ │
-│                             ┌────────────┐ │
-│                             │ uploads/   │ │
-│                             │ (volume)   │ │
-│                             └────────────┘ │
 └────────────────────────────────────────────┘
 ```
 
-PostgreSQL은 어떤 애플리케이션 서비스에도 속하지 않는 공통 인프라다. backend와 ai-server는 같은 DB 인스턴스에 접속하지만, 테이블 소유권과 migration 책임은 분리한다.
+PostgreSQL은 어떤 애플리케이션 서비스에도 속하지 않는 공통 인프라다. backend와 ai-server는 같은 DB 인스턴스에 접속하지만, 테이블 소유권과 migration 책임은 분리한다. 업로드 파일 본문은 Docker volume이 아니라 S3에만 저장하고, DB에는 S3 위치와 메타데이터만 저장한다.
 
 권장 DB 구조:
 
@@ -190,7 +186,7 @@ src/askhub_ai_server/
     security.py         # service-to-service 인증 검증
   models/
     chat.py             # ChatSession, Message
-    document.py         # RagSource, DocumentChunk, IngestionJob
+    document.py         # RagSource, IngestionJob; DocumentChunk는 RAG 검색 단계에서 추가
     file.py             # UserFile
   schemas/
     chat.py             # 요청/응답 Pydantic 모델
@@ -204,7 +200,7 @@ src/askhub_ai_server/
     retriever.py        # pgvector 벡터 유사도 검색
     answer_policy.py    # 답변 가능 여부 판단
     citation_builder.py # 검색 metadata → Citation 변환
-    llm.py              # BedrockLLMService, MockLLMService
+    llm.py              # BedrockLLMService
   ingestion/
     worker.py           # job loop
     jobs.py             # job 처리 로직
@@ -222,9 +218,9 @@ src/askhub_ai_server/
 
 ### P1. 기본 LLM/SSE 기반 구현 ✅
 
-- ✅ Bedrock LLM(Amazon Nova Micro)과 mock LLM 서비스를 구현했다.
+- ✅ Bedrock LLM(Amazon Nova Lite)을 구현했다. Bedrock 실패 시 mock fallback은 사용하지 않는다.
 - ✅ SSE token streaming 유틸리티를 구현했다.
-- ✅ `POST /v1/sources`, `POST /v1/ingestion-jobs`, `GET /v1/ingestion-jobs/{job_id}` mock 스캐폴딩을 추가했다.
+- ✅ `POST /v1/sources`, `POST /v1/ingestion-jobs`, `GET /v1/ingestion-jobs/{job_id}`를 DB 영속 API로 구현했다.
 - ✅ 과거 공개 endpoint였던 `POST /v1/chat`, `POST /v1/chat/stream`은 세션 기반 API 전환 후 제거했다.
 
 ### P2. DB 연결 + 채팅 히스토리 ✅
@@ -238,9 +234,9 @@ src/askhub_ai_server/
 
 ### P2-후속. 파일 관리
 
-- `user_files` 모델을 만들고 파일 업로드 API를 추가한다.
-- MVP에서는 Docker Volume, 운영에서는 S3에 파일을 저장한다.
-- 세션 메시지 API의 `file_ids`를 파일 context 주입 로직과 연결한다.
+- ✅ `user_files` 모델을 만들고 파일 업로드 API를 추가했다.
+- ✅ 파일 본문은 S3에만 저장한다. Docker volume/local storage fallback은 사용하지 않는다.
+- ✅ 세션 메시지 API의 `file_ids`를 파일 context 주입 로직과 연결했다. 텍스트는 UTF-8 context로, 이미지와 문서는 Bedrock content block으로 전달한다.
 
 ### P3. RAG (pgvector)
 
@@ -272,12 +268,12 @@ src/askhub_ai_server/
 
 ## 단계적 구현 순서
 
-1. ~~`BedrockLLMService`와 `MockLLMService`를 구현한다.~~ → ✅ 완료.
+1. ~~`BedrockLLMService`를 구현한다.~~ → ✅ 완료.
 2. ~~SSE streaming을 구현한다.~~ → ✅ 완료.
-3. ~~`sources`와 `ingestion-jobs` API를 mock으로 구현한다.~~ → ✅ 완료.
+3. ~~`sources`와 `ingestion-jobs` API를 DB 영속 API로 구현한다.~~ → ✅ 완료.
 4. ~~DB 연결 설정 + Alembic 초기화 + 테이블 생성.~~ → ✅ 완료.
 5. ~~채팅 API를 세션 기반으로 전환 + 히스토리 DB 관리.~~ → ✅ 완료.
-6. 파일 업로드 API 추가. → 이번 범위에서는 보류.
+6. ~~파일 업로드 API 추가.~~ → ✅ 완료.
 7. pgvector 벡터 검색 + 임베딩 서비스 구현.
 8. RAG를 채팅 API에 통합.
 9. AnswerPolicy + CitationBuilder 구현.
