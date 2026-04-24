@@ -13,10 +13,22 @@ class Settings(BaseSettings):
     # AWS Bedrock
     aws_region: str = "ap-southeast-2"
     bedrock_model_id: str = "amazon.nova-lite-v1:0"
+    bedrock_embed_model_id: str = "amazon.titan-embed-text-v2:0"
 
-    # Database and file storage
+    # RAG retrieval
+    rag_embedding_dimensions: int = 1024
+    rag_top_k: int = 5
+    rag_similarity_threshold: float = 0.3
+    rag_answerable_threshold: float = 0.5
+    rag_max_context_tokens: int = 4000
+
+    # Database
     database_url: str
     db_schema: str = "ai"
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+    db_pool_timeout: int = 10
+    db_pool_recycle: int = 1800
     file_storage_backend: str = "s3"
     s3_bucket: str = ""
     s3_region: str = "ap-northeast-2"
@@ -36,6 +48,15 @@ class Settings(BaseSettings):
         alias="ALLOWED_UPLOAD_CONTENT_TYPES",
     )
     max_history_messages: int = 20
+
+    # Pagination
+    default_page_limit: int = 20
+    max_page_limit: int = 100
+
+    # LLM resilience
+    llm_timeout_seconds: int = 60
+    llm_circuit_failure_threshold: int = 5
+    llm_circuit_recovery_seconds: int = 30
 
     # Service-to-service authentication. Backend must sign requests to ai-server.
     service_auth_enabled: bool = True

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from askhub_ai_server.core.config import Settings
 from askhub_ai_server.models import ChatSession, UserFile
+from askhub_ai_server.models.enums import FilePurpose
 from askhub_ai_server.schemas.chat import ChatAttachment
 from askhub_ai_server.services.exceptions import ServiceError
 from askhub_ai_server.services.file_storage import FileStorage, get_file_storage
@@ -163,7 +164,7 @@ class AttachmentContextBuilder:
             raise ServiceError(404, "attached file not found")
         if user_file.session_id is not None and user_file.session_id != session.id:
             raise ServiceError(403, "file session mismatch")
-        if user_file.purpose != "chat_attachment":
+        if user_file.purpose != FilePurpose.CHAT_ATTACHMENT:
             raise ServiceError(400, "only chat attachment files can be attached to chat messages")
 
     @property

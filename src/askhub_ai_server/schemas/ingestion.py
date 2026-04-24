@@ -18,6 +18,7 @@ class IngestionJobResponse(BaseModel):
     source_id: UUID
     mode: IngestionMode
     status: IngestionJobStatus
+    is_terminal: bool
     indexed_object_count: int
     failure_reason: str | None = None
     created_at: datetime

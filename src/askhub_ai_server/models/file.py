@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from askhub_ai_server.core.config import get_settings
 from askhub_ai_server.core.database import Base
+from askhub_ai_server.models.enums import FilePurpose
 
 DB_SCHEMA = get_settings().db_schema
 
@@ -35,7 +36,9 @@ class UserFile(Base):
     storage_provider: Mapped[str] = mapped_column(String(20), nullable=False, default="local")
     storage_bucket: Mapped[str | None] = mapped_column(String(255))
     storage_key: Mapped[str | None] = mapped_column(Text)
-    purpose: Mapped[str] = mapped_column(String(20), nullable=False, default="chat_attachment")
+    purpose: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=FilePurpose.CHAT_ATTACHMENT,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

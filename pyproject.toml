@@ -19,7 +19,12 @@ dependencies = [
     "sqlalchemy>=2.0,<3",
     "uvicorn[standard]>=0.30,<1",
     "python-pptx>=1.0,<2",
+    "pymupdf>=1.24,<2",
+    "python-docx>=1.1,<2",
 ]
+
+[project.scripts]
+askhub-worker = "askhub_ai_server.worker:main"
 
 [project.optional-dependencies]
 dev = [

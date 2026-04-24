@@ -35,6 +35,8 @@ class FileStorage(Protocol):
 
     def delete_file(self, stored_file: StoredFile) -> None: ...
 
+    def generate_download_url(self, user_file: UserFile, expires_in: int = 300) -> str: ...
+
 
 class S3FileStorage:
     def __init__(self, settings: Settings) -> None:
@@ -84,6 +86,21 @@ class S3FileStorage:
         key = stored_file.key or _parse_s3_key(stored_file.path)
         if key:
             self._client.delete_object(Bucket=bucket, Key=key)
+
+    def generate_download_url(self, user_file: UserFile, expires_in: int = 300) -> str:
+        bucket = user_file.storage_bucket or self._bucket
+        key = user_file.storage_key or _parse_s3_key(user_file.storage_path)
+        if not key:
+            raise FileNotFoundError(f"S3 object key is missing for file {user_file.id}")
+        return self._client.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": bucket,
+                "Key": key,
+                "ResponseContentDisposition": f'inline; filename="{user_file.filename}"',
+            },
+            ExpiresIn=expires_in,
+        )
 
     def _build_key(self, *, user_id: int, file_id: uuid.UUID, filename: str) -> str:
         safe_filename = Path(filename or "unknown").name

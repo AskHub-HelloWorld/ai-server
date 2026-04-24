@@ -57,13 +57,24 @@ class ChatRequest(BaseModel):
 
 
 class Citation(BaseModel):
-    """답변 근거 출처 (Phase 2 RAG에서 사용 예정)."""
+    """답변 근거 출처 — 인라인 인용 [N]과 매핑."""
 
+    index: int = Field(description="인라인 인용 번호 (1-based, LLM 응답의 [N]과 매핑)")
     title: str
     source_type: str
     url: str | None = None
+    is_external: bool = Field(
+        default=False,
+        description="True이면 url이 외부 링크(예: GitHub), False이면 내부 API 경로",
+    )
+    viewer_type: str | None = Field(
+        default=None,
+        description="문서 뷰어 유형: 'pdf', 'text', 'external'",
+    )
     repo: str | None = None
+    file_id: str | None = None
     path: str | None = None
+    chunk_index: int | None = None
     commit_sha: str | None = None
     line_start: int | None = None
     line_end: int | None = None
@@ -120,6 +131,10 @@ class ChatSessionResponse(BaseModel):
 
 class ChatSessionListResponse(BaseModel):
     sessions: list[ChatSessionResponse] = Field(default_factory=list)
+    next_cursor: str | None = Field(
+        default=None, description="다음 페이지 커서 (마지막 세션 ID)"
+    )
+    has_more: bool = Field(default=False, description="추가 페이지 존재 여부")
 
 
 class MessageResponse(BaseModel):
@@ -130,13 +145,23 @@ class MessageResponse(BaseModel):
     id: UUID
     role: Literal["user", "assistant"]
     content: str
+    status: Literal["pending", "completed", "failed"] = "completed"
+    failure_reason: str | None = None
     answerable: bool | None = None
+    response_type: str | None = Field(
+        default=None,
+        description="응답 유형: 'rag' (RAG 기반) 또는 'general' (일반)",
+    )
     citations: list[dict] = Field(default_factory=list)
     created_at: datetime
 
 
 class ChatSessionDetailResponse(ChatSessionResponse):
     messages: list[MessageResponse] = Field(default_factory=list)
+    next_message_cursor: str | None = Field(
+        default=None, description="메시지 페이지네이션 커서"
+    )
+    has_more_messages: bool = Field(default=False, description="추가 메시지 존재 여부")
 
 
 class SessionMessageRequest(BaseModel):

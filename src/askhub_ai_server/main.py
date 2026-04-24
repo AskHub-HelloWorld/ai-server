@@ -1,8 +1,18 @@
-from fastapi import FastAPI
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from askhub_ai_server.api.routes import chat, files, health, ingestion_jobs, sources
 from askhub_ai_server.core.config import Settings, get_settings
+from askhub_ai_server.core.database import SessionLocal
+from askhub_ai_server.core.observability import ObservabilityMiddleware, configure_logging
+from askhub_ai_server.services.exceptions import ServiceError
+from askhub_ai_server.services.message_cleanup import cleanup_stale_pending_messages
+
+logger = logging.getLogger(__name__)
 
 TAGS_METADATA = [
     {
@@ -18,7 +28,7 @@ TAGS_METADATA = [
         "description": "RAG 소스 등록",
     },
     {
-        "name": "파일 관리",
+        "name": "files",
         "description": "파일 업로드/조회 — 채팅 첨부 또는 RAG 소스 등록",
     },
     {
@@ -28,9 +38,27 @@ TAGS_METADATA = [
 ]
 
 
+def _run_startup_cleanup() -> None:
+    """앱 시작 시 stale pending 메시지를 정리한다."""
+    try:
+        with SessionLocal() as db:
+            cleanup_stale_pending_messages(db)
+    except Exception:
+        logger.warning("Startup pending message cleanup failed", exc_info=True)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved_settings = settings or get_settings()
+
+    configure_logging(resolved_settings.log_level)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        _run_startup_cleanup()
+        yield
+
     app = FastAPI(
+        lifespan=lifespan,
         title=resolved_settings.app_name,
         version=resolved_settings.app_version,
         description=(
@@ -53,6 +81,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_tags=TAGS_METADATA,
     )
 
+    # --- Middleware (outermost first) ---
+    app.add_middleware(ObservabilityMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=resolved_settings.allowed_origins,
@@ -61,6 +91,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
+    # --- Global exception handler for ServiceError ---
+    @app.exception_handler(ServiceError)
+    async def service_error_handler(_request: Request, exc: ServiceError) -> JSONResponse:
+        request_id = getattr(_request.state, "request_id", "-")
+        logger.warning(
+            "ServiceError: %s %s",
+            exc.error_code,
+            exc.detail,
+            extra={"error_code": exc.error_code, "request_id": request_id},
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": exc.error_code,
+                "detail": exc.detail,
+                "request_id": request_id,
+            },
+        )
+
+    # --- Routes ---
     app.include_router(health.router)
     app.include_router(chat.router, prefix="/v1")
     app.include_router(files.router, prefix="/v1")

@@ -23,6 +23,9 @@ build/
 *.pfx
 node_modules/
 docs/wbs*.xlsx
+test-results/
+*.tmp
+*.temp
 tests/fixtures/exam_ch4.pdf
 tests/fixtures/test_env_screenshot.png
 .DS_Store

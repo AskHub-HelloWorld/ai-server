@@ -9,12 +9,17 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from askhub_ai_server.core.config import get_settings
 from askhub_ai_server.core.database import Base
+from askhub_ai_server.models.enums import MessageStatus
 
 DB_SCHEMA = get_settings().db_schema
 
 
 class ChatSession(Base):
     __tablename__ = "chat_sessions"
+    __table_args__ = (
+        Index("ix_ai_chat_sessions_user_updated", "user_id", "updated_at"),
+        Index("ix_ai_chat_sessions_user_team_updated", "user_id", "team_id", "updated_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -51,6 +56,8 @@ class Message(Base):
     )
     role: Mapped[str] = mapped_column(String(10), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default=MessageStatus.COMPLETED)
+    failure_reason: Mapped[str | None] = mapped_column(Text)
     answerable: Mapped[bool | None] = mapped_column(Boolean)
     citations: Mapped[list[dict] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(

@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,7 @@ from askhub_ai_server.core.config import Settings, get_settings
 from askhub_ai_server.core.database import SessionLocal, get_db
 from askhub_ai_server.core.security import ServiceContext, get_service_context
 from askhub_ai_server.models import ChatSession, Message
+from askhub_ai_server.models.enums import MessageRole, ResponseType
 from askhub_ai_server.schemas.chat import (
     ChatSessionCreateRequest,
     ChatSessionDetailResponse,
@@ -23,9 +24,13 @@ from askhub_ai_server.schemas.chat import (
     SessionMessageRequest,
     SessionMessageResponse,
 )
-from askhub_ai_server.services.chat_service import ChatService, LLMRequestError
-from askhub_ai_server.services.exceptions import ServiceError
+from askhub_ai_server.services.chat_service import ChatService, MessageRepository
+from askhub_ai_server.services.citation_normalizer import normalize_inline_citations
+from askhub_ai_server.services.embedding import get_embedding_service
+from askhub_ai_server.services.exceptions import LLMRequestError, ServiceError
 from askhub_ai_server.services.llm import get_llm_service
+from askhub_ai_server.services.rag_context import RagContextBuilder
+from askhub_ai_server.services.retriever import PgVectorRetriever
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +41,10 @@ SSE_STREAM_DESCRIPTION = """\
 
 | event | data | 설명 |
 |-------|------|------|
-| `metadata` | `{"session_id": "...", "user_message_id": "..."}` | 세션/사용자 메시지 정보 |
+| `metadata` | `{"session_id": "...", "user_message_id": "...", ...}` | 세션/메시지 정보 |
 | `token` | `{"delta": "텍스트 조각"}` | 토큰 단위 응답 |
 | `done` | `{"assistant_message_id": "...", ...}` | 응답 저장 후 스트리밍 완료 |
-| `error` | `{"message": "에러 내용"}` | 오류 발생 시 |
+| `error` | `{"message": "에러 내용"}` | 오류 발생 시 (assistant message → failed) |
 """
 
 
@@ -51,11 +56,26 @@ def _get_chat_service(
     db: Annotated[Session, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> ChatService:
-    return ChatService(db=db, settings=settings, llm=get_llm_service())
+    llm = get_llm_service()
+    retriever = PgVectorRetriever(db, get_embedding_service(), settings)
+    rag_builder = RagContextBuilder(
+        retriever,
+        max_context_tokens=settings.rag_max_context_tokens,
+        query_rewriter=llm,
+        answerable_threshold=settings.rag_answerable_threshold,
+    )
+    return ChatService(
+        db=db, settings=settings, llm=llm, rag_builder=rag_builder,
+    )
 
 
 def _http_exception(error: ServiceError) -> HTTPException:
     return HTTPException(status_code=error.status_code, detail=error.detail)
+
+
+# ---------------------------------------------------------------------------
+# Session CRUD
+# ---------------------------------------------------------------------------
 
 
 @router.post(
@@ -80,13 +100,24 @@ def create_chat_session(
 def list_chat_sessions(
     context: Annotated[ServiceContext, Depends(get_service_context)],
     service: Annotated[ChatService, Depends(_get_chat_service)],
+    settings: Annotated[Settings, Depends(get_settings)],
     team_id: int | None = None,
+    cursor: Annotated[
+        UUID | None,
+        Query(description="이전 페이지 마지막 세션 ID"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=100, description="페이지 크기")] = 20,
 ) -> ChatSessionListResponse:
     try:
-        sessions = service.list_sessions(context, team_id)
+        clamped_limit = min(limit, settings.max_page_limit)
+        page = service.list_sessions(context, team_id, cursor=cursor, limit=clamped_limit)
     except ServiceError as exc:
         raise _http_exception(exc) from exc
-    return ChatSessionListResponse(sessions=[_session_response(session) for session in sessions])
+    return ChatSessionListResponse(
+        sessions=[_session_response(s) for s in page.items],
+        next_cursor=str(page.next_cursor) if page.next_cursor else None,
+        has_more=page.has_more,
+    )
 
 
 @router.get(
@@ -98,15 +129,36 @@ def get_chat_session(
     session_id: UUID,
     context: Annotated[ServiceContext, Depends(get_service_context)],
     service: Annotated[ChatService, Depends(_get_chat_service)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    message_cursor: Annotated[
+        UUID | None,
+        Query(description="메시지 커서"),
+    ] = None,
+    message_limit: Annotated[
+        int,
+        Query(ge=1, le=200, description="메시지 페이지 크기"),
+    ] = 50,
 ) -> ChatSessionDetailResponse:
     try:
-        session, messages = service.get_session_detail(session_id, context)
+        clamped_limit = min(message_limit, settings.max_page_limit)
+        session, msg_page = service.get_session_detail(
+            session_id, context,
+            message_cursor=message_cursor,
+            message_limit=clamped_limit,
+        )
     except ServiceError as exc:
         raise _http_exception(exc) from exc
     return ChatSessionDetailResponse(
         **_session_response(session).model_dump(),
-        messages=[_message_response(message) for message in messages],
+        messages=[_message_response(m) for m in msg_page.items],
+        next_message_cursor=str(msg_page.next_cursor) if msg_page.next_cursor else None,
+        has_more_messages=msg_page.has_more,
     )
+
+
+# ---------------------------------------------------------------------------
+# Message send (non-streaming & streaming)
+# ---------------------------------------------------------------------------
 
 
 @router.post(
@@ -126,8 +178,8 @@ def create_session_message(
         raise _http_exception(exc) from exc
     except LLMRequestError as exc:
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="LLM request failed",
+            status_code=exc.status_code,
+            detail=exc.detail,
         ) from exc
     return SessionMessageResponse(
         session_id=result.session_id,
@@ -159,7 +211,6 @@ def stream_session_message(
     session_id: UUID,
     request: SessionMessageRequest,
     context: Annotated[ServiceContext, Depends(get_service_context)],
-    settings: Annotated[Settings, Depends(get_settings)],
     service: Annotated[ChatService, Depends(_get_chat_service)],
 ) -> StreamingResponse:
     try:
@@ -168,57 +219,93 @@ def stream_session_message(
         raise _http_exception(exc) from exc
 
     def event_stream() -> Iterator[str]:
+        # 1. metadata — client now knows all IDs up front
         yield _sse(
             "metadata",
             {
                 "session_id": str(prepared.session_id),
                 "user_message_id": str(prepared.user_message_id),
+                "assistant_message_id": str(prepared.assistant_message_id),
             },
         )
 
+        # 2. stream tokens from LLM
         full_response = ""
-        answerable = True
         try:
             for delta in get_llm_service().converse_stream(prepared.chat_request):
                 full_response += delta
                 yield _sse("token", {"delta": delta})
-        except Exception:
+        except Exception as exc:
             logger.exception("세션 메시지 LLM 스트리밍 실패")
+            # Mark assistant message as failed
+            _fail_assistant_in_new_session(
+                prepared.assistant_message_id, str(exc),
+            )
             yield _sse("error", {"message": "LLM request failed"})
             return
 
-        with SessionLocal() as streaming_db:
-            streaming_service = ChatService(
-                db=streaming_db,
-                settings=settings,
-                llm=get_llm_service(),
+        # 3. persist completed assistant message (separate DB session)
+        citations = prepared.rag_citations or []
+        full_response, citations = normalize_inline_citations(full_response, citations)
+        answerable = prepared.rag_answerable
+        try:
+            _complete_assistant_in_new_session(
+                prepared.assistant_message_id, full_response,
+                citations=citations, answerable=answerable,
             )
-            try:
-                result = streaming_service.complete_message(
-                    session_id=prepared.session_id,
-                    user_message_id=prepared.user_message_id,
-                    context=context,
-                    answer=full_response,
-                    answerable=answerable,
-                    citations=[],
-                )
-            except ServiceError:
-                logger.exception("세션 메시지 스트리밍 저장 실패")
-                yield _sse("error", {"message": "message persistence failed"})
-                return
+        except Exception:
+            logger.exception("세션 메시지 스트리밍 저장 실패")
+            yield _sse("error", {"message": "message persistence failed"})
+            return
+
+        response_type = ResponseType.RAG if answerable and citations else ResponseType.GENERAL
 
         yield _sse(
             "done",
             {
-                "session_id": str(result.session_id),
-                "user_message_id": str(result.user_message_id),
-                "assistant_message_id": str(result.assistant_message_id),
+                "session_id": str(prepared.session_id),
+                "user_message_id": str(prepared.user_message_id),
+                "assistant_message_id": str(prepared.assistant_message_id),
                 "full_response": full_response,
                 "answerable": answerable,
+                "response_type": response_type,
+                "citations": citations,
             },
         )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Streaming helpers — lightweight DB operations without full ChatService
+# ---------------------------------------------------------------------------
+
+
+def _complete_assistant_in_new_session(
+    message_id: UUID,
+    content: str,
+    *,
+    citations: list[dict] | None = None,
+    answerable: bool = False,
+) -> None:
+    """Complete a pending assistant message using a fresh DB session."""
+    with SessionLocal() as db:
+        repo = MessageRepository(db)
+        repo.complete_assistant_message(
+            message_id, content, answerable=answerable, citations=citations or [],
+        )
+
+
+def _fail_assistant_in_new_session(message_id: UUID, reason: str) -> None:
+    """Mark a pending assistant message as failed using a fresh DB session."""
+    with SessionLocal() as db:
+        repo = MessageRepository(db)
+        repo.fail_assistant_message(message_id, reason)
+
+
+# ---------------------------------------------------------------------------
+# Response builders
+# ---------------------------------------------------------------------------
 
 
 def _session_response(session: ChatSession) -> ChatSessionResponse:
@@ -233,11 +320,20 @@ def _session_response(session: ChatSession) -> ChatSessionResponse:
 
 
 def _message_response(message: Message) -> MessageResponse:
+    citations = message.citations or []
+    answerable = message.answerable
+    response_type: str | None = None
+    if message.role == MessageRole.ASSISTANT and answerable is not None:
+        response_type = ResponseType.RAG if answerable and citations else ResponseType.GENERAL
+
     return MessageResponse(
         id=message.id,
         role=message.role,
         content=message.content,
-        answerable=message.answerable,
-        citations=message.citations or [],
+        status=message.status,
+        failure_reason=message.failure_reason,
+        answerable=answerable,
+        response_type=response_type,
+        citations=citations,
         created_at=message.created_at,
     )

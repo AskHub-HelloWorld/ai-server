@@ -1,52 +1,71 @@
+"""RAG 소스 관리 엔드포인트."""
+
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from askhub_ai_server.core.database import get_db
 from askhub_ai_server.core.security import ServiceContext, get_service_context
-from askhub_ai_server.models.document import RagSource
-from askhub_ai_server.schemas.source import SourceCreateRequest, SourceResponse
+from askhub_ai_server.schemas.source import (
+    SourceCreateRequest,
+    SourceListResponse,
+    SourceResponse,
+)
+from askhub_ai_server.services.exceptions import ServiceError
+from askhub_ai_server.services.source_service import SourceService
 
 router = APIRouter(prefix="/sources", tags=["sources"])
+
+
+def _get_source_service(
+    db: Annotated[Session, Depends(get_db)],
+) -> SourceService:
+    return SourceService(db)
+
+
+def _http_exception(error: ServiceError) -> HTTPException:
+    return HTTPException(status_code=error.status_code, detail=error.detail)
 
 
 @router.post("", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
 def create_source(
     request: SourceCreateRequest,
     context: Annotated[ServiceContext, Depends(get_service_context)],
-    db: Annotated[Session, Depends(get_db)],
+    service: Annotated[SourceService, Depends(_get_source_service)],
 ) -> SourceResponse:
-    if context.team_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="team context is required to register a RAG source",
-        )
+    try:
+        source = service.create_source(request, context)
+    except ServiceError as exc:
+        raise _http_exception(exc) from exc
+    return SourceService.to_response(source)
 
-    source = RagSource(
-        source_type=request.source_type,
-        name=request.name,
-        team_id=context.team_id,
-        repo_url=request.repo_url,
-        default_branch=request.default_branch,
-        url=request.url,
-        status="registered",
+
+@router.get("", response_model=SourceListResponse)
+def list_sources(
+    context: Annotated[ServiceContext, Depends(get_service_context)],
+    service: Annotated[SourceService, Depends(_get_source_service)],
+) -> SourceListResponse:
+    try:
+        rows = service.list_sources(context)
+    except ServiceError as exc:
+        raise _http_exception(exc) from exc
+    return SourceListResponse(
+        sources=[
+            SourceService.to_response(source, chunk_count=int(count or 0))
+            for source, count in rows
+        ]
     )
-    db.add(source)
-    db.commit()
-    db.refresh(source)
-    return _source_response(source)
 
 
-def _source_response(source: RagSource) -> SourceResponse:
-    return SourceResponse(
-        source_id=source.id,
-        source_type=source.source_type,
-        name=source.name,
-        team_id=source.team_id,
-        status=source.status,
-        repo_url=source.repo_url,
-        default_branch=source.default_branch,
-        url=source.url,
-        created_at=source.created_at,
-    )
+@router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_source(
+    source_id: UUID,
+    context: Annotated[ServiceContext, Depends(get_service_context)],
+    service: Annotated[SourceService, Depends(_get_source_service)],
+) -> None:
+    try:
+        service.delete_source(source_id, context)
+    except ServiceError as exc:
+        raise _http_exception(exc) from exc

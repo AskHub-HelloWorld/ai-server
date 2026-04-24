@@ -1,8 +1,20 @@
+x-common-env: &common-env
+  PYTHONPATH: /app/src
+  DB_SCHEMA: ${DB_SCHEMA:?DB_SCHEMA is required}
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@${POSTGRES_HOST:?POSTGRES_HOST is required}:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+  SERVICE_AUTH_ENABLED: "true"
+  SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?SERVICE_AUTH_SECRET is required}
+
+x-common-build: &common-build
+  context: .
+  target: dev
+
+x-common-volumes: &common-volumes
+  - .:/app
+
 services:
   api:
-    build:
-      context: .
-      target: dev
+    build: *common-build
     image: askhub-ai-server:dev
     command: uvicorn askhub_ai_server.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
@@ -10,40 +22,41 @@ services:
     env_file:
       - .env
     environment:
-      PYTHONPATH: /app/src
-      DB_SCHEMA: ${DB_SCHEMA:?DB_SCHEMA is required}
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@${POSTGRES_HOST:?POSTGRES_HOST is required}:5432/${POSTGRES_DB:?POSTGRES_DB is required}
-      SERVICE_AUTH_ENABLED: "true"
-      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?SERVICE_AUTH_SECRET is required}
-    volumes:
-      - .:/app
+      <<: *common-env
+    volumes: *common-volumes
+    networks:
+      - askhub
+
+  worker:
+    build: *common-build
+    image: askhub-ai-server:dev
+    command: askhub-worker
+    profiles:
+      - worker
+    env_file:
+      - .env
+    environment:
+      <<: *common-env
+    volumes: *common-volumes
     networks:
       - askhub
 
   api-test:
-    build:
-      context: .
-      target: dev
+    build: *common-build
     image: askhub-ai-server:dev
     command: pytest
     env_file:
       - .env
     environment:
-      PYTHONPATH: /app/src
+      <<: *common-env
       APP_ENV: test
       DB_SCHEMA: ${TEST_DB_SCHEMA:?TEST_DB_SCHEMA is required}
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@${POSTGRES_HOST:?POSTGRES_HOST is required}:5432/${POSTGRES_DB:?POSTGRES_DB is required}
-      SERVICE_AUTH_ENABLED: "true"
-      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?SERVICE_AUTH_SECRET is required}
-    volumes:
-      - .:/app
+    volumes: *common-volumes
     networks:
       - askhub
 
   migrate:
-    build:
-      context: .
-      target: dev
+    build: *common-build
     image: askhub-ai-server:dev
     command: alembic upgrade head
     profiles:
@@ -51,13 +64,8 @@ services:
     env_file:
       - .env
     environment:
-      PYTHONPATH: /app/src
-      DB_SCHEMA: ${DB_SCHEMA:?DB_SCHEMA is required}
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@${POSTGRES_HOST:?POSTGRES_HOST is required}:5432/${POSTGRES_DB:?POSTGRES_DB is required}
-      SERVICE_AUTH_ENABLED: "true"
-      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?SERVICE_AUTH_SECRET is required}
-    volumes:
-      - .:/app
+      <<: *common-env
+    volumes: *common-volumes
     networks:
       - askhub
 
