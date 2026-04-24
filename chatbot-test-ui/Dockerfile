@@ -2,7 +2,8 @@ FROM python:3.12-alpine
 
 WORKDIR /app
 
-COPY index.html styles.css app.js server.py ./
+COPY index.html styles.css server.py proxy_rag_smoke.py github_rag_smoke.py ./
+COPY js/ ./js/
 
 ENV PORT=8080
 ENV STATIC_ROOT=/app

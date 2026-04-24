@@ -3,8 +3,41 @@ from conftest import auth_headers
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from askhub_ai_server.api.routes import files as files_route
 from askhub_ai_server.core.config import get_settings
 from askhub_ai_server.models import UserFile
+
+
+class FakeStorage:
+    def generate_download_url(self, user_file: UserFile, expires_in: int = 300) -> str:
+        return f"https://example.test/download/{user_file.id}?expires={expires_in}"
+
+
+def _create_file_record(
+    db_session: Session,
+    *,
+    user_id: int = 1,
+    team_id: int = 10,
+    purpose: str = "rag_source",
+) -> UserFile:
+    import uuid
+
+    user_file = UserFile(
+        id=uuid.uuid4(),
+        user_id=user_id,
+        team_id=team_id,
+        filename="guide.pdf",
+        content_type="application/pdf",
+        file_size=12,
+        storage_path="s3://bucket/key",
+        storage_provider="s3",
+        storage_bucket="bucket",
+        storage_key="key",
+        purpose=purpose,
+    )
+    db_session.add(user_file)
+    db_session.commit()
+    return user_file
 
 
 def test_upload_list_and_get_file_metadata(client: TestClient, db_session: Session) -> None:
@@ -82,6 +115,66 @@ def test_file_metadata_hides_other_users_file(client: TestClient, db_session: Se
             s3_client.delete_object(Bucket=settings.s3_bucket, Key=storage_key)
 
 
+def test_download_file_redirects_to_presigned_url_for_owner(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    user_file = _create_file_record(db_session, user_id=1, team_id=10)
+    monkeypatch.setattr(files_route, "get_file_storage", lambda settings: FakeStorage())
+    path = f"/v1/files/{user_file.id}/download"
+
+    response = client.get(
+        path,
+        headers=auth_headers("GET", path, user_id=1, team_id=10),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"].startswith("https://example.test/download/")
+
+
+def test_download_file_allows_same_team_rag_source_file(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    user_file = _create_file_record(db_session, user_id=2, team_id=10, purpose="rag_source")
+    monkeypatch.setattr(files_route, "get_file_storage", lambda settings: FakeStorage())
+    path = f"/v1/files/{user_file.id}/download"
+
+    response = client.get(
+        path,
+        headers=auth_headers("GET", path, user_id=1, team_id=10),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+
+
+def test_download_file_rejects_other_users_chat_attachment(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    user_file = _create_file_record(
+        db_session,
+        user_id=2,
+        team_id=10,
+        purpose="chat_attachment",
+    )
+    monkeypatch.setattr(files_route, "get_file_storage", lambda settings: FakeStorage())
+    path = f"/v1/files/{user_file.id}/download"
+
+    response = client.get(
+        path,
+        headers=auth_headers("GET", path, user_id=1, team_id=10),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 404
+
+
 def test_upload_accepts_png_content_type(client: TestClient, db_session: Session) -> None:
     settings = get_settings()
     s3_client = boto3.client("s3", region_name=settings.s3_region)
@@ -152,24 +245,12 @@ def test_upload_accepts_docx_content_type(client: TestClient, db_session: Sessio
             s3_client.delete_object(Bucket=settings.s3_bucket, Key=storage_key)
 
 
-def test_upload_accepts_any_content_type(client: TestClient, db_session: Session) -> None:
-    settings = get_settings()
-    s3_client = boto3.client("s3", region_name=settings.s3_region)
-    storage_key: str | None = None
+def test_upload_rejects_disallowed_content_type(client: TestClient) -> None:
+    response = client.post(
+        "/v1/files/upload",
+        headers=auth_headers("POST", "/v1/files/upload", user_id=1, team_id=10),
+        files={"file": ("archive.zip", b"PK\x03\x04 fake zip", "application/zip")},
+        data={"purpose": "chat_attachment"},
+    )
 
-    try:
-        response = client.post(
-            "/v1/files/upload",
-            headers=auth_headers("POST", "/v1/files/upload", user_id=1, team_id=10),
-            files={"file": ("archive.zip", b"PK\x03\x04 fake zip", "application/zip")},
-            data={"purpose": "chat_attachment"},
-        )
-
-        assert response.status_code == 201
-        assert response.json()["content_type"] == "application/zip"
-        user_file = db_session.get(UserFile, response.json()["id"])
-        if user_file:
-            storage_key = user_file.storage_key
-    finally:
-        if storage_key:
-            s3_client.delete_object(Bucket=settings.s3_bucket, Key=storage_key)
+    assert response.status_code == 400

@@ -45,6 +45,7 @@ def migrated_test_schema() -> Iterator[None]:
 def clean_tables(migrated_test_schema: None) -> Iterator[None]:
     settings = get_settings()
     tables = [
+        "document_chunks",
         "ingestion_jobs",
         "rag_sources",
         "user_files",

@@ -1,13 +1,14 @@
 # AskHub AI Server 개발 계획
 
-권장 전체 아키텍처와 후속 작업 목록은 `docs/architecture.md`를 기준으로 한다.
+권장 전체 아키텍처와 후속 작업 목록은 `docs/architecture.md`를 기준으로 한다. 실행, 테스트, 린트, 마이그레이션은 `docs/local-docker.md`의 Docker Compose 명령만 공식 경로로 사용한다.
 
 ## Phase 0. 레포지토리 부트스트랩 ✅
 
 - Python/FastAPI 프로젝트 구조를 만든다.
 - health API를 추가한다.
 - env 템플릿, multi-stage Dockerfile, compose.yaml, 기본 테스트를 추가한다.
-- 로컬 실행, 테스트, 린트는 Docker Compose 기준으로 통일한다.
+- 실행, 테스트, 린트, 마이그레이션은 Docker Compose 기준으로 통일한다.
+- 로컬 Python, 로컬 pytest, 로컬 ruff, 로컬 uvicorn 실행은 공식 개발 경로에서 제외한다.
 
 ## Phase 1. 기본 AI 채팅 ✅
 
@@ -43,28 +44,31 @@
 - 세션 메시지 API의 `file_ids`를 실제 파일 context 주입 로직과 연결한다.
 위 항목 중 S3 파일 관리와 텍스트/이미지/문서 채팅 context 주입은 완료했다.
 
-## Phase 3. RAG (pgvector)
+## Phase 3. RAG (pgvector) ✅
 
-- Bedrock Titan Embed를 호출하여 임베딩을 생성하는 서비스를 만든다.
-- `PgVectorRetriever`를 구현한다 (team_id 필터 + cosine similarity 검색).
-- 채팅 API에 RAG 검색 결과를 LLM context로 주입하는 로직을 통합한다.
-- `AnswerPolicy`를 만들어 검색 근거 부족 시 `answerable=false`를 판단한다.
-- `CitationBuilder`를 만들어 검색 metadata를 citation 형식으로 변환한다.
-- 검색 근거가 약하면 `suggested_post`(커뮤니티 게시글 초안)를 반환한다.
+- ✅ Bedrock Titan Embed v2를 호출하여 임베딩을 생성하는 `BedrockEmbeddingService`를 만들었다.
+- ✅ `PgVectorRetriever`를 구현했다 (team_id 필터 + cosine similarity 검색).
+- ✅ 채팅 API에 RAG 검색 결과를 LLM context로 주입하는 `RagContextBuilder`를 통합했다.
+- ✅ 검색 유사도 threshold(`rag_answerable_threshold`)로 `answerable` 여부를 판단한다. 별도 `AnswerPolicy` 클래스는 유사도 기반 판단으로 대체했다.
+- ✅ `CitationBuilder`를 만들어 검색 metadata를 citation 형식으로 변환한다.
+- ✅ `citation_normalizer`로 LLM 응답의 인라인 인용 번호를 정규화한다.
+- ✅ RAG 검색 질의 재작성(`rewrite_for_retrieval`)을 구현했다.
+- 검색 근거가 약하면 `suggested_post`(커뮤니티 게시글 초안)를 반환한다. → 후속 구현 범위.
 
-## Phase 4. Ingestion Worker
+## Phase 4. Ingestion Worker ✅
 
-- worker process를 실제 job loop로 바꾼다.
-- GitHub repo 코드를 수집하는 loader를 만든다.
-- 사내 문서를 수집하는 loader를 만든다.
-- 수집한 파일을 chunk로 분할하고, 임베딩을 생성하여 `document_chunks`에 저장한다.
-- `rag_sources`, `ingestion_jobs` 테이블로 소스 등록과 작업 상태를 관리한다.
-- 로컬에서는 `docker compose --profile worker up worker`로 worker를 실행한다.
+- ✅ worker process를 실제 job loop로 구현했다 (polling + SELECT FOR UPDATE SKIP LOCKED).
+- ✅ GitHub repo 코드를 수집하는 `github_loader`를 만들었다.
+- ✅ 사내 문서(PDF/DOCX/PPTX)를 수집하는 `document_loader`를 만들었다.
+- ✅ 수집한 파일을 chunk로 분할(`chunker`)하고, 임베딩을 생성하여 `document_chunks`에 저장한다.
+- ✅ `rag_sources`, `ingestion_jobs` 테이블로 소스 등록과 작업 상태를 관리한다.
+- ✅ 소스 요약 생성 기능을 추가했다 (문서: map-reduce 요약, 리포지토리: 파일트리+샘플 기반 요약).
+- ✅ 로컬에서는 `docker compose --profile worker up --build worker`로 worker를 실행한다.
 
 ## Phase 5. 보안과 배포
 
-- backend가 전달한 user/team context를 검증하는 middleware를 추가한다.
-- retrieval filter에 team ID를 강제한다.
+- ✅ backend가 전달한 user/team context를 검증하는 service-to-service HMAC 인증을 구현했다.
+- ✅ retrieval filter에 team ID를 강제한다.
 - prompt injection 방어용 system prompt 정책을 추가한다.
 - Docker image를 ECR에 push하고 EC2에 배포한다.
 - EC2 루트 compose에서는 backend, ai-server, PostgreSQL 16 + pgvector를 함께 올리고 파일 본문은 S3에 저장한다.

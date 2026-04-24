@@ -6,6 +6,7 @@
 - `backend`와 `frontend` 레포는 읽기 전용으로 참고만 하며, 이 레포에서 수정하지 않는다.
 - `ai-server`는 AI 채팅, 대화 히스토리, RAG 검색, 출처 구성, 답변 불가 판단, 파일 관리, ingestion을 담당한다.
 - 사용자 인증, 사용자/팀/권한 원장, 커뮤니티 게시글/댓글/포인트/상품 교환은 backend가 담당한다.
+- 로컬 실행, 테스트, 린트, 마이그레이션은 Docker Compose 안에서만 수행한다. 로컬 Python 실행은 공식 개발 경로가 아니다.
 - MVP에서는 단일 EC2의 공통 PostgreSQL 16 + pgvector 인스턴스를 backend와 ai-server가 함께 사용한다.
 - 공통 DB를 사용하되 schema/table ownership은 엄격히 분리한다. backend와 ai-server는 각자 소유한 schema/table만 마이그레이션하고 쓰기 작업을 수행한다.
 
@@ -173,48 +174,71 @@ CREATE TABLE ai.user_files (
 
 ```text
 src/askhub_ai_server/
+  main.py               # FastAPI 앱 팩토리 + 라우터 등록
+  worker.py             # Ingestion Worker 메인 루프 (polling → claim → process)
   api/
     routes/
-      health.py
-      chat.py          # 세션 관리 + 채팅 + SSE 스트리밍
-      files.py          # 파일 업로드/조회
-      sources.py        # RAG 소스 등록
-      ingestion_jobs.py # 인덱싱 작업 관리
+      health.py          # GET /health, GET /ready
+      chat.py            # 세션 관리 + 채팅 + SSE 스트리밍
+      files.py           # 파일 업로드/조회/다운로드
+      sources.py         # RAG 소스 등록/조회/삭제
+      ingestion_jobs.py  # 인덱싱 작업 관리
   core/
-    config.py           # Bedrock + DB 설정
-    database.py         # SQLAlchemy 엔진/세션
-    security.py         # service-to-service 인증 검증
+    config.py            # Pydantic Settings (Bedrock + DB + S3 + 인증)
+    database.py          # SQLAlchemy 엔진/세션
+    security.py          # service-to-service HMAC 인증 검증
+    observability.py     # JSON 로깅 + ObservabilityMiddleware
   models/
-    chat.py             # ChatSession, Message
-    document.py         # RagSource, IngestionJob; DocumentChunk는 RAG 검색 단계에서 추가
-    file.py             # UserFile
+    enums.py             # 도메인 StrEnum (MessageStatus, MessageRole, JobStatus, SourceStatus, SourceType 등)
+    chat.py              # ChatSession, Message
+    document.py          # RagSource, IngestionJob, DocumentChunk (pgvector)
+    file.py              # UserFile
   schemas/
-    chat.py             # 요청/응답 Pydantic 모델
-    source.py
-    ingestion.py
-    citation.py
-    file.py
+    chat.py              # 채팅 요청/응답 Pydantic 모델 + Citation 스키마
+    source.py            # RAG 소스 요청/응답
+    ingestion.py         # 인덱싱 작업 요청/응답
+    file.py              # 파일 요청/응답
+    health.py            # 헬스체크 응답
   services/
-    chat_service.py     # 히스토리 조회 + RAG + LLM 오케스트레이션
-    embedding.py        # Bedrock Titan Embed 호출
-    retriever.py        # pgvector 벡터 유사도 검색
-    answer_policy.py    # 답변 가능 여부 판단
-    citation_builder.py # 검색 metadata → Citation 변환
-    llm.py              # BedrockLLMService
-  ingestion/
-    worker.py           # job loop
-    jobs.py             # job 처리 로직
+    chat_service.py      # MessageRepository + ChatService (히스토리 + RAG + LLM 오케스트레이션)
+    llm.py               # BedrockLLMService (Converse / ConverseStream, prompts/ 파일 로딩)
+    embedding.py         # BedrockEmbeddingService (Titan Embed v2)
+    retriever.py         # PgVectorRetriever (cosine similarity + team_id 필터)
+    rag_context.py       # RagContextBuilder + CitationBuilder
+    attachment_context.py # 파일 첨부 context 빌더
+    file_storage.py      # S3FileStorage (업로드/다운로드/presigned URL)
+    file_service.py      # 파일 CRUD 서비스
+    source_service.py    # RAG 소스 CRUD 서비스
+    ingestion_job_service.py # 인덱싱 작업 서비스
+    pagination.py        # 공통 cursor-based pagination 유틸리티
+    summary_service.py   # 소스 요약 생성 (문서: map-reduce, 코드: 파일트리+샘플)
+    chunker.py           # 문서/코드 청킹 (코드 vs 문서 전략 분기)
+    citation_normalizer.py # LLM 응답 인라인 인용 정규화
+    circuit_breaker.py   # LLM 회로 차단기 (CLOSED → OPEN → HALF_OPEN)
+    message_cleanup.py   # stale pending 메시지 정리 (앱 시작 시)
+    exceptions.py        # ServiceError, LLMRequestError, LLMCircuitOpenError
     loaders/
-      github_loader.py
-      document_loader.py
+      github_loader.py   # GitHub 리포지토리 클론 + 파일 수집
+      document_loader.py # PDF/DOCX/PPTX 텍스트 추출
+  prompts/               # 외부화된 시스템 프롬프트 텍스트 파일
+    system.txt           # 메인 어시스턴트 시스템 프롬프트
+    query_rewrite.txt    # RAG 검색 질의 재작성 프롬프트
+    summarize.txt        # 문서 요약 프롬프트
+    codebase_summarize.txt # 코드베이스 분석 프롬프트
+    rag_context_instructions.txt # RAG 참고자료 인용 지시문
+    rag_user_query.txt   # RAG 사용자 질문 템플릿
 ```
 
 ## 후속 작업
 
-### P0. Docker-first 기반 안정화 ✅
+### P0. Docker-only 기반 안정화 ✅
 
 - ✅ `.env.example`에 Bedrock 관련 변수를 정리했다.
-- ✅ `docker compose run --rm api pytest`와 `docker compose run --rm api ruff check .`를 기준 명령으로 유지한다.
+- ✅ 로컬 실행, 테스트, 린트, 마이그레이션은 Docker Compose 기준으로 통일한다.
+- ✅ 테스트는 `docker compose run --rm api-test pytest`로 실행한다.
+- ✅ 린트는 `docker compose run --rm api-test ruff check .`로 실행한다.
+- ✅ DB migration은 `docker compose --profile tools run --rm migrate`로 실행한다.
+- ✅ 상세 실행 절차는 `docs/local-docker.md`에서 관리한다.
 
 ### P1. 기본 LLM/SSE 기반 구현 ✅
 
@@ -238,27 +262,30 @@ src/askhub_ai_server/
 - ✅ 파일 본문은 S3에만 저장한다. Docker volume/local storage fallback은 사용하지 않는다.
 - ✅ 세션 메시지 API의 `file_ids`를 파일 context 주입 로직과 연결했다. 텍스트는 UTF-8 context로, 이미지와 문서는 Bedrock content block으로 전달한다.
 
-### P3. RAG (pgvector)
+### P3. RAG (pgvector) ✅
 
-- `Retriever` 인터페이스와 `PgVectorRetriever`를 구현한다.
-- Bedrock Titan Embed를 호출하여 임베딩을 생성하는 서비스를 만든다.
-- `document_chunks` 테이블에 벡터 인덱스(IVFFlat)를 설정한다.
-- 채팅 API에 RAG 검색 결과를 LLM context로 주입하는 로직을 통합한다.
-- `AnswerPolicy`를 만들어 검색 근거 부족 시 `answerable=false`를 판단한다.
-- `CitationBuilder`를 만들어 문서/코드 출처를 공통 형식으로 변환한다.
+- ✅ `PgVectorRetriever`를 구현했다 (cosine similarity + team_id 필터).
+- ✅ Bedrock Titan Embed v2를 호출하여 임베딩을 생성하는 `BedrockEmbeddingService`를 만들었다.
+- ✅ `document_chunks` 테이블에 pgvector 컬럼을 설정했다.
+- ✅ 채팅 API에 RAG 검색 결과를 LLM context로 주입하는 `RagContextBuilder`를 통합했다.
+- ✅ `CitationBuilder`를 만들어 문서/코드 출처를 공통 형식으로 변환한다.
+- ✅ 검색 유사도 threshold(`rag_answerable_threshold`)로 `answerable` 여부를 판단한다. 별도 `AnswerPolicy` 클래스는 현재 미구현이며, 유사도 기반 단순 비교로 대체했다.
+- ✅ `citation_normalizer`로 LLM 응답의 인라인 인용 번호를 정규화한다.
+- ✅ RAG 검색 질의 재작성(`rewrite_for_retrieval`)을 구현했다.
 
-### P4. Ingestion Worker
+### P4. Ingestion Worker ✅
 
-- worker process를 실제 job loop로 바꾼다.
-- GitHub repo source를 clone/pull하여 코드를 수집하는 loader를 만든다.
-- 문서 source를 읽는 loader를 만든다.
-- 수집한 파일을 chunk로 분할하고, 임베딩을 생성하여 `document_chunks`에 저장한다.
-- `ingestion_jobs` 테이블로 작업 상태를 추적한다.
+- ✅ worker process를 실제 job loop로 구현했다 (polling + SELECT FOR UPDATE SKIP LOCKED).
+- ✅ GitHub repo source를 clone/pull하여 코드를 수집하는 `github_loader`를 만들었다.
+- ✅ 문서(PDF/DOCX/PPTX) source를 읽는 `document_loader`를 만들었다.
+- ✅ 수집한 파일을 chunk로 분할(`chunker`)하고, 임베딩을 생성하여 `document_chunks`에 저장한다.
+- ✅ `ingestion_jobs` 테이블로 작업 상태를 추적한다 (queued → running → succeeded/failed).
+- ✅ 소스 요약 생성 기능을 추가했다 (문서: map-reduce 요약, 리포지토리: 파일트리+샘플 기반 요약).
 
 ### P5. 보안과 권한
 
-- backend가 전달한 user/team context를 검증하는 middleware를 추가한다.
-- retrieval filter에 team ID를 강제한다.
+- ✅ backend가 전달한 user/team context를 검증하는 service-to-service HMAC 인증을 구현했다.
+- ✅ retrieval filter에 team ID를 강제한다.
 - prompt injection 방어용 system prompt 정책을 추가한다.
 
 ### P6. 배포 준비
@@ -274,10 +301,10 @@ src/askhub_ai_server/
 4. ~~DB 연결 설정 + Alembic 초기화 + 테이블 생성.~~ → ✅ 완료.
 5. ~~채팅 API를 세션 기반으로 전환 + 히스토리 DB 관리.~~ → ✅ 완료.
 6. ~~파일 업로드 API 추가.~~ → ✅ 완료.
-7. pgvector 벡터 검색 + 임베딩 서비스 구현.
-8. RAG를 채팅 API에 통합.
-9. AnswerPolicy + CitationBuilder 구현.
-10. Ingestion worker 실제 구현.
+7. ~~pgvector 벡터 검색 + 임베딩 서비스 구현.~~ → ✅ 완료.
+8. ~~RAG를 채팅 API에 통합.~~ → ✅ 완료.
+9. ~~CitationBuilder 구현.~~ → ✅ 완료. AnswerPolicy는 유사도 threshold 기반 판단으로 대체.
+10. ~~Ingestion worker 실제 구현.~~ → ✅ 완료.
 11. EC2 배포.
 
 ## 대안과 보류한 선택지

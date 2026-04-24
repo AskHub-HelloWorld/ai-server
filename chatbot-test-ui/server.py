@@ -8,7 +8,7 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 HOP_BY_HOP_HEADERS = {
@@ -27,6 +27,8 @@ TIMESTAMP_HEADER = "X-AskHub-Timestamp"
 SIGNATURE_HEADER = "X-AskHub-Signature"
 TEST_USER_ID_HEADER = "X-Test-User-Id"
 TEST_TEAM_ID_HEADER = "X-Test-Team-Id"
+TEST_USER_ID_QUERY = "test_user_id"
+TEST_TEAM_ID_QUERY = "test_team_id"
 
 
 def build_service_signature(
@@ -113,7 +115,16 @@ class ChatbotTestUiHandler(SimpleHTTPRequestHandler):
         target_path = parsed.path.removeprefix("/api")
         if not target_path.startswith("/"):
             target_path = f"/{target_path}"
-        return target_path, parsed.query
+
+        auth_params: dict[str, str] = {}
+        upstream_query_pairs: list[tuple[str, str]] = []
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+            if key in {TEST_USER_ID_QUERY, TEST_TEAM_ID_QUERY}:
+                auth_params[key] = value
+            else:
+                upstream_query_pairs.append((key, value))
+        self._test_auth_query = auth_params
+        return target_path, urlencode(upstream_query_pairs)
 
     def build_upstream_url(self, target_path: str, query: str) -> str:
         base_url = os.getenv("AI_SERVER_BASE_URL", "http://host.docker.internal:8000").rstrip("/")
@@ -183,6 +194,13 @@ class ChatbotTestUiHandler(SimpleHTTPRequestHandler):
 
     def parse_int_header(self, name: str, *, required: bool) -> int | None:
         value = self.headers.get(name, "").strip()
+        if not value:
+            query_name = {
+                TEST_USER_ID_HEADER: TEST_USER_ID_QUERY,
+                TEST_TEAM_ID_HEADER: TEST_TEAM_ID_QUERY,
+            }.get(name)
+            if query_name:
+                value = getattr(self, "_test_auth_query", {}).get(query_name, "").strip()
         if not value:
             if required:
                 raise ValueError(f"{name} header is required")

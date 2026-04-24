@@ -2,8 +2,8 @@
 
 ## 문서 상태
 
-- 상태: 3차 초안
-- 최종 수정: 2026-04-12
+- 상태: 현재 구현 기준 계약
+- 최종 수정: 2026-04-17
 - 목적: backend/frontend와 ai-server 사이의 연동 계약을 정의한다.
 
 ## 연동 방향
@@ -42,6 +42,7 @@ schema: ai       -> ai-server 소유
 - 기본 언어는 한국어다.
 - 모든 시간은 ISO 8601 문자열을 사용한다.
 - backend와 ai-server 사이에는 service-to-service 인증을 둔다.
+- ai-server의 실행, 테스트, 린트, 마이그레이션은 `docs/local-docker.md`의 Docker Compose 명령을 기준으로 한다.
 
 ## Service-to-service 인증
 
@@ -283,6 +284,52 @@ ai-server는 streaming 시작 전에 user 메시지를 저장하고, `done` 이�
 ### `GET /v1/files/{file_id}`
 
 헤더 context의 사용자가 소유한 파일 metadata를 조회한다.
+
+### `GET /v1/files/{file_id}/download`
+
+권한 검증 후 S3 presigned URL로 302 리다이렉트한다.
+
+- 소유자 본인 파일: 직접 다운로드 가능.
+- 타인 파일: `purpose=rag_source`이고 같은 팀인 경우에만 다운로드 가능.
+
+## RAG 소스 API (추가)
+
+### `GET /v1/sources`
+
+헤더 context의 팀에 등록된 RAG 소스 목록을 조회한다. 각 소스의 `chunk_count`도 함께 반환한다.
+
+팀 context가 없으면 400을 반환한다.
+
+응답 예시:
+
+```json
+{
+  "sources": [
+    {
+      "source_id": "770e8400-...",
+      "source_type": "repository",
+      "name": "github.com/AskHub-HelloWorld/backend",
+      "team_id": 10,
+      "status": "ready",
+      "status_label": "✓ 사용 가능",
+      "type_label": "레포",
+      "repo_url": "https://github.com/AskHub-HelloWorld/backend.git",
+      "default_branch": "main",
+      "summary": "Spring Boot 기반 백엔드 서비스...",
+      "chunk_count": 142,
+      "created_at": "2026-04-13T10:00:00Z"
+    }
+  ]
+}
+```
+
+### `DELETE /v1/sources/{source_id}`
+
+RAG 소스를 삭제한다. 연결된 `ingestion_jobs`와 `document_chunks`도 CASCADE 삭제된다.
+
+팀 context와 소스의 `team_id`가 일치해야 한다. 불일치 시 404를 반환한다.
+
+성공 시 204 No Content를 반환한다.
 
 ---
 

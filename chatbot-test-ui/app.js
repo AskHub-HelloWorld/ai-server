@@ -1,15 +1,27 @@
 "use strict";
 
+// Legacy single-file UI bundle. The active UI loads ./js/main.js from index.html.
+
 const COPY_ICON = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
 const CHECK_ICON = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
 
+/* ── State ── */
+
 const state = {
+  currentView: "chat",
   currentSessionId: null,
   sessions: [],
   attachedFiles: [],
+  sources: [],
+  files: [],
+  filesCursor: null,
+  filesHasMore: false,
   isSending: false,
+  isSourceBusy: false,
   streamingText: "",
 };
+
+/* ── DOM Elements ── */
 
 const els = {
   userIdInput: document.querySelector("#userIdInput"),
@@ -18,6 +30,8 @@ const els = {
   newChatButton: document.querySelector("#newChatButton"),
   refreshSessionsButton: document.querySelector("#refreshSessionsButton"),
   sessionList: document.querySelector("#sessionList"),
+  viewSourcesButton: document.querySelector("#viewSourcesButton"),
+  chatView: document.querySelector("#chatView"),
   connectionStatus: document.querySelector("#connectionStatus"),
   sessionTitle: document.querySelector("#sessionTitle"),
   messages: document.querySelector("#messages"),
@@ -25,6 +39,21 @@ const els = {
   fileInput: document.querySelector("#fileInput"),
   messageInput: document.querySelector("#messageInput"),
   sendButton: document.querySelector("#sendButton"),
+  sourcesView: document.querySelector("#sourcesView"),
+  closeSourcesBtn: document.querySelector("#closeSourcesBtn"),
+  sourceUploadTrigger: document.querySelector("#sourceUploadTrigger"),
+  sourceFileInput: document.querySelector("#sourceFileInput2"),
+  sourceStatusBar: document.querySelector("#sourceStatusBar"),
+  sourceStatusText: document.querySelector("#sourceStatusText"),
+  sourceCount: document.querySelector("#sourceCount"),
+  sourceList: document.querySelector("#sourceList2"),
+  refreshSourcesBtn: document.querySelector("#refreshSourcesBtn"),
+  filesList: document.querySelector("#filesList"),
+  loadMoreFilesBtn: document.querySelector("#loadMoreFilesBtn"),
+  docViewerModal: document.querySelector("#docViewerModal"),
+  docViewerTitle: document.querySelector("#docViewerTitle"),
+  docViewerBody: document.querySelector("#docViewerBody"),
+  docViewerClose: document.querySelector("#docViewerClose"),
 };
 
 /* ── Utilities ── */
@@ -53,6 +82,16 @@ function buildUrl(path, query = "") {
   return `/api${path}${query ? `?${query}` : ""}`;
 }
 
+function buildLinkUrl(path, query = "") {
+  const params = new URLSearchParams(query);
+  params.set("test_user_id", String(getUserId()));
+  const teamId = getTeamId();
+  if (teamId !== null) {
+    params.set("test_team_id", String(teamId));
+  }
+  return buildUrl(path, params.toString());
+}
+
 function setStatus(message, type = "") {
   els.connectionStatus.textContent = message;
   els.connectionStatus.classList.toggle("ok", type === "ok");
@@ -66,11 +105,32 @@ function setBusy(isBusy) {
   els.messageInput.disabled = isBusy;
 }
 
+function setSourceBusy(isBusy) {
+  state.isSourceBusy = isBusy;
+  if(els.sourceUploadTrigger) {
+    els.sourceUploadTrigger.disabled = isBusy;
+  }
+}
+
+function setSourceStatus(message, type = "") {
+  els.sourceStatusBar.hidden = !message;
+  els.sourceStatusText.textContent = message;
+  els.sourceStatusBar.classList.toggle("ok", type === "ok");
+  els.sourceStatusBar.classList.toggle("error", type === "error");
+}
+
 function formatError(error) {
   if (error instanceof Error) {
     return error.message;
   }
   return String(error);
+}
+
+function formatFileSize(bytes) {
+  if (!bytes) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function getTestContextHeaders() {
@@ -83,6 +143,22 @@ function getTestContextHeaders() {
     headers["X-Test-Team-Id"] = String(teamId);
   }
   return headers;
+}
+
+/* ── View Switching ── */
+
+function switchView(view) {
+  state.currentView = view;
+  if (view === "chat") {
+    // Only toggling sources panel visibility now
+    els.sourcesView.hidden = true;
+    els.viewSourcesButton.classList.remove("active");
+  } else {
+    els.sourcesView.hidden = false;
+    els.viewSourcesButton.classList.add("active");
+    loadSources().catch(() => {});
+    loadFiles(true).catch(() => {});
+  }
 }
 
 /* ── API ── */
@@ -124,7 +200,7 @@ async function readErrorBody(response) {
   }
 }
 
-/* ── Health / Sessions ── */
+/* ── Health / Ready ── */
 
 async function healthCheck() {
   try {
@@ -133,11 +209,20 @@ async function healthCheck() {
       throw new Error(`${response.status} ${response.statusText}`);
     }
     const body = await response.json();
-    setStatus(`${body.status || "ok"} · ${body.version || "unknown"}`, "ok");
+    let readyLabel = "";
+    try {
+      const readyRes = await fetch(buildUrl("/ready"));
+      readyLabel = readyRes.ok ? " · ready" : " · not ready";
+    } catch {
+      readyLabel = "";
+    }
+    setStatus(`${body.status || "ok"} · ${body.version || "unknown"}${readyLabel}`, "ok");
   } catch (error) {
     setStatus(formatError(error), "error");
   }
 }
+
+/* ── Sessions ── */
 
 async function createSession() {
   const response = await apiFetch("/v1/chat/sessions", {
@@ -188,7 +273,149 @@ function syncSessionTitleFromList() {
   }
 }
 
-/* ── Rendering ── */
+/* ── RAG Sources ── */
+
+async function loadSources() {
+  const response = await apiFetch("/v1/sources");
+  const body = await response.json();
+  state.sources = body.sources || [];
+  renderSourcesList();
+  return state.sources;
+}
+
+async function addSelectedSource() {
+  const file = els.sourceFileInput.files[0];
+  if (!file) {
+    setSourceStatus("소스 파일을 선택하세요.", "error");
+    return;
+  }
+  if (getTeamId() === null) {
+    setSourceStatus("RAG 소스는 Team ID가 필요합니다.", "error");
+    return;
+  }
+
+  setSourceBusy(true);
+  setSourceStatus("소스 파일 업로드 중...");
+  try {
+    const uploaded = await uploadRagSourceFile(file);
+    setSourceStatus("소스 등록 중...");
+    const source = await createDocumentSource(uploaded);
+    setSourceStatus("인덱싱 작업 생성 중...");
+    const job = await createIngestionJob(source.source_id);
+    setSourceStatus("인덱싱 중. worker가 실행 중이어야 합니다.");
+    const completed = await waitForIngestionJob(job.job_id);
+    await loadSources();
+    await loadFiles(true);
+    if (completed.status === "succeeded") {
+      setSourceStatus(
+        `인덱싱 완료: ${uploaded.filename} · ${completed.indexed_object_count}개 chunk`,
+        "ok",
+      );
+      els.sourceFileInput.value = "";
+    } else {
+      setSourceStatus(completed.failure_reason || "인덱싱 실패", "error");
+    }
+  } catch (error) {
+    setSourceStatus(formatError(error), "error");
+  } finally {
+    setSourceBusy(false);
+  }
+}
+
+async function uploadRagSourceFile(file) {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("purpose", "rag_source");
+
+  const response = await apiFetch("/v1/files/upload", {
+    method: "POST",
+    body: form,
+  });
+  return response.json();
+}
+
+async function createDocumentSource(file) {
+  const response = await apiFetch("/v1/sources", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source_type: "document",
+      name: file.filename,
+      file_id: file.id,
+    }),
+  });
+  return response.json();
+}
+
+async function createIngestionJob(sourceId) {
+  const response = await apiFetch("/v1/ingestion-jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source_id: sourceId, mode: "full" }),
+  });
+  return response.json();
+}
+
+async function waitForIngestionJob(jobId) {
+  const startedAt = Date.now();
+  const timeoutMs = 180000;
+  while (Date.now() - startedAt < timeoutMs) {
+    const response = await apiFetch(`/v1/ingestion-jobs/${jobId}`);
+    const job = await response.json();
+    if (job.status === "succeeded" || job.status === "failed") {
+      return job;
+    }
+    await sleep(2000);
+  }
+  throw new Error("인덱싱 대기 시간이 초과되었습니다. worker 상태를 확인하세요.");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function deleteSource(sourceId) {
+  setSourceBusy(true);
+  setSourceStatus("소스 삭제 중...");
+  try {
+    await apiFetch(`/v1/sources/${sourceId}`, { method: "DELETE" });
+    await loadSources();
+    setSourceStatus("소스를 삭제했습니다.", "ok");
+  } catch (error) {
+    setSourceStatus(formatError(error), "error");
+  } finally {
+    setSourceBusy(false);
+  }
+}
+
+/* ── Files API ── */
+
+async function loadFiles(reset = true) {
+  if (reset) {
+    state.files = [];
+    state.filesCursor = null;
+    state.filesHasMore = false;
+  }
+  const params = new URLSearchParams({ limit: "20" });
+  if (state.filesCursor) {
+    params.set("cursor", state.filesCursor);
+  }
+  try {
+    const response = await apiFetch("/v1/files", { query: params.toString() });
+    const body = await response.json();
+    const newFiles = body.files || [];
+    state.files = reset ? newFiles : [...state.files, ...newFiles];
+    state.filesCursor = body.next_cursor || null;
+    state.filesHasMore = body.has_more || false;
+    renderFilesList();
+  } catch (error) {
+    console.error("파일 목록 조회 실패:", error);
+  }
+}
+
+/* ── Rendering — Sessions ── */
 
 function renderSessions() {
   els.sessionList.replaceChildren();
@@ -208,6 +435,9 @@ function renderSessions() {
     button.textContent = session.title || "새 채팅";
     button.title = session.title || session.session_id;
     button.addEventListener("click", () => {
+      if (state.currentView !== "chat") {
+        switchView("chat");
+      }
       loadSessionDetail(session.session_id).catch((error) => {
         setStatus(formatError(error), "error");
       });
@@ -223,7 +453,7 @@ function renderMessages(messages) {
     return;
   }
   for (const message of messages) {
-    appendMessage(message.role, message.content);
+    appendMessage(message.role, message.content, [], message.citations || []);
   }
   scrollToBottom();
 }
@@ -237,28 +467,143 @@ function renderEmptyState() {
   els.messages.append(wrapper);
 }
 
+/* ── Rendering — Sources View ── */
+
+function renderSourcesList() {
+  els.sourceList.replaceChildren();
+  els.sourceCount.textContent = state.sources.length;
+
+  if (!state.sources.length) {
+    const empty = document.createElement("div");
+    empty.className = "src-empty";
+    empty.textContent = "등록된 소스가 없습니다. 파일을 업로드하여 소스를 추가하세요.";
+    els.sourceList.append(empty);
+    return;
+  }
+
+  for (const source of state.sources) {
+    els.sourceList.append(createSourceCard(source));
+  }
+}
+
+function createSourceCard(source) {
+  const card = document.createElement("div");
+  card.className = "src-card";
+
+  const info = document.createElement("div");
+  info.className = "src-card-info";
+
+  const icon = document.createElement("div");
+  icon.className = "src-card-icon";
+  icon.textContent = source.source_type === "repository" ? "📦" : "📄";
+
+  const metaBox = document.createElement("div");
+  metaBox.className = "src-card-meta";
+
+  const name = document.createElement("p");
+  name.className = "src-card-name";
+  name.textContent = source.name || source.source_id;
+  name.title = name.textContent;
+
+  const details = document.createElement("p");
+  details.className = "src-card-details";
+  const statusLabel = { registered: "⬜ 등록됨", indexing: "⏳ 인덱싱", ready: "✅ 사용", error: "❌ 오류" };
+  details.textContent = `${statusLabel[source.status] || source.status} · ${source.chunk_count || 0} chunks`;
+
+  metaBox.append(name, details);
+  info.append(icon, metaBox);
+
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.className = "src-card-delete";
+  deleteBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>`;
+  deleteBtn.title = "삭제";
+  deleteBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    deleteSource(source.source_id);
+  });
+
+  card.append(info, deleteBtn);
+  return card;
+}
+
+/* ── Rendering — Files List ── */
+
+function renderFilesList() {
+  els.filesList.replaceChildren();
+
+  if (!state.files.length) {
+    const empty = document.createElement("div");
+    empty.className = "files-empty";
+    empty.textContent = "업로드된 파일이 없습니다.";
+    els.filesList.append(empty);
+    els.loadMoreFilesBtn.hidden = true;
+    return;
+  }
+
+  for (const file of state.files) {
+    els.filesList.append(createFileListItem(file));
+  }
+  els.loadMoreFilesBtn.hidden = !state.filesHasMore;
+}
+
+function createFileListItem(file) {
+  const item = document.createElement("div");
+  item.className = "src-card"; // using the same styling as source card
+
+  const info = document.createElement("div");
+  info.className = "src-card-info";
+
+  const icon = document.createElement("div");
+  icon.className = "src-card-icon";
+  icon.textContent = "▤";
+
+  const metaBox = document.createElement("div");
+  metaBox.className = "src-card-meta";
+
+  const name = document.createElement("p");
+  name.className = "src-card-name";
+  name.textContent = file.filename;
+  name.title = file.filename;
+
+  const details = document.createElement("p");
+  details.className = "src-card-details";
+  const size = formatFileSize(file.file_size);
+  details.textContent = `${size} · ${new Date(file.created_at).toLocaleDateString("ko-KR")}`;
+
+  metaBox.append(name, details);
+  info.append(icon, metaBox);
+
+  const downloadLink = document.createElement("a");
+  downloadLink.href = buildLinkUrl(`/v1/files/${file.id}/download`);
+  downloadLink.target = "_blank";
+  downloadLink.rel = "noreferrer";
+  downloadLink.className = "src-card-delete"; // reuse button style
+  downloadLink.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
+  downloadLink.title = "다운로드";
+
+  item.append(info, downloadLink);
+  return item;
+}
+
 /* ── Math Protection ── */
 
 function protectMath(text) {
   const blocks = [];
   const ph = (i) => `%%MATH_${i}%%`;
 
-  // Display math: $$...$$ (multiline)
   text = text.replace(/\$\$([\s\S]+?)\$\$/g, (m, c) => {
     blocks.push({ content: c.trim(), display: true });
     return ph(blocks.length - 1);
   });
-  // Display math: \[...\]
   text = text.replace(/\\\[([\s\S]+?)\\\]/g, (m, c) => {
     blocks.push({ content: c.trim(), display: true });
     return ph(blocks.length - 1);
   });
-  // Inline math: \(...\)
   text = text.replace(/\\\((.+?)\\\)/g, (m, c) => {
     blocks.push({ content: c.trim(), display: false });
     return ph(blocks.length - 1);
   });
-  // Inline math: $...$ (single line)
   text = text.replace(/\$([^\$\n]+?)\$/g, (m, c) => {
     blocks.push({ content: c.trim(), display: false });
     return ph(blocks.length - 1);
@@ -371,7 +716,7 @@ function createCopyButton(messageTextEl) {
 
 /* ── Messages ── */
 
-function appendMessage(role, content, files = []) {
+function appendMessage(role, content, files = [], citations = []) {
   removeEmptyState();
   const outer = document.createElement("article");
   outer.className = `message ${role}`;
@@ -403,6 +748,9 @@ function appendMessage(role, content, files = []) {
 
   if (role === "assistant" && content) {
     renderMarkdown(textEl, content);
+    if (citations.length) {
+      processInlineCitations(textEl, citations);
+    }
   } else {
     textEl.textContent = content;
   }
@@ -410,6 +758,7 @@ function appendMessage(role, content, files = []) {
   contentEl.append(textEl);
 
   if (role === "assistant") {
+    renderCitations(contentEl, citations);
     contentEl.append(createCopyButton(textEl));
   }
 
@@ -419,6 +768,217 @@ function appendMessage(role, content, files = []) {
   scrollToBottom();
   return textEl;
 }
+
+function renderCitations(contentEl, citations = []) {
+  const existing = contentEl.querySelector(".citation-list");
+  if (existing) {
+    existing.remove();
+  }
+  if (!citations.length) {
+    return;
+  }
+
+  const list = document.createElement("div");
+  list.className = "citation-list";
+
+  for (const citation of citations) {
+    const link = document.createElement("a");
+    link.className = "citation-link";
+    link.dataset.index = citation.index;
+
+    const isExternal = citation.url && !citation.url.startsWith("/v1/");
+
+    if (isExternal) {
+      link.href = citation.url;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+    } else {
+      link.href = "#";
+      link.addEventListener("click", (e) => {
+        e.preventDefault();
+        showDocumentViewer(citation);
+      });
+    }
+
+    const iconSpan = document.createElement("span");
+    iconSpan.className = "citation-icon";
+    iconSpan.textContent = citation.source_type === "repository" ? "📦" : "📄";
+
+    const label = document.createElement("span");
+    label.className = "citation-label";
+    label.textContent = `[${citation.index}]`;
+
+    const text = document.createElement("span");
+    text.className = "citation-title";
+    const locator = citation.line_start
+      ? `L${citation.line_start}${citation.line_end ? `-L${citation.line_end}` : ""}`
+      : `chunk ${citation.chunk_index ?? 0}`;
+    text.textContent = `${citation.title || citation.path || "source"} · ${locator}`;
+
+    link.append(iconSpan, label, text);
+    list.append(link);
+  }
+
+  contentEl.append(list);
+}
+
+function citationUrl(url) {
+  if (!url) {
+    return "#";
+  }
+  if (url.startsWith("/v1/")) {
+    return buildLinkUrl(url);
+  }
+  return url;
+}
+
+/* ── Inline Citation Processing ── */
+
+function processInlineCitations(el, citations) {
+  if (!citations.length) return;
+
+  const citationByIndex = new Map();
+  for (const citation of citations) {
+    const index = Number.parseInt(citation.index, 10);
+    if (Number.isInteger(index) && index > 0) {
+      citationByIndex.set(index, citation);
+    }
+  }
+  if (!citationByIndex.size) return;
+
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  let node;
+  while ((node = walker.nextNode())) {
+    if (/\[\d+\]/.test(node.textContent)) {
+      textNodes.push(node);
+    }
+  }
+
+  for (const textNode of textNodes) {
+    const parts = textNode.textContent.split(/(\[\d+\])/g);
+    if (parts.length <= 1) continue;
+
+    const fragment = document.createDocumentFragment();
+    for (const part of parts) {
+      const match = part.match(/^\[(\d+)\]$/);
+      if (match) {
+        const index = Number.parseInt(match[1], 10);
+        const citation = citationByIndex.get(index);
+        if (!citation) {
+          fragment.appendChild(document.createTextNode(part));
+          continue;
+        }
+        const badge = document.createElement("span");
+        badge.className = "inline-citation";
+        badge.textContent = `[${index}]`;
+        badge.dataset.index = String(index);
+        badge.title = citation.title || citation.path || `출처 ${index}`;
+        badge.addEventListener("click", () => {
+          const citationEl = el
+            .closest(".message-content")
+            ?.querySelector(`.citation-link[data-index="${index}"]`);
+          if (citationEl) {
+            citationEl.classList.add("highlight");
+            citationEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            setTimeout(() => citationEl.classList.remove("highlight"), 2000);
+          }
+          const isExternal = citation.url && !citation.url.startsWith("/v1/");
+          if (!isExternal) {
+            showDocumentViewer(citation);
+          }
+        });
+        fragment.appendChild(badge);
+      } else if (part) {
+        fragment.appendChild(document.createTextNode(part));
+      }
+    }
+    textNode.parentNode.replaceChild(fragment, textNode);
+  }
+}
+
+/* ── Document Viewer Modal ── */
+
+function showDocumentViewer(citation) {
+  if (!citation) return;
+
+  const isExternal = citation.url && !citation.url.startsWith("/v1/");
+  if (isExternal) {
+    window.open(citation.url, "_blank", "noreferrer");
+    return;
+  }
+
+  els.docViewerTitle.textContent = citation.title || citation.path || "문서 보기";
+  els.docViewerBody.replaceChildren();
+
+  const url = citationUrl(citation.url);
+
+  if (url && url !== "#") {
+    const filename = (citation.title || citation.path || "").toLowerCase();
+
+    if (filename.endsWith(".pdf")) {
+      const iframe = document.createElement("iframe");
+      iframe.src = url;
+      iframe.className = "doc-viewer-iframe";
+      iframe.setAttribute("loading", "lazy");
+      els.docViewerBody.append(iframe);
+    } else {
+      const loading = document.createElement("div");
+      loading.className = "doc-viewer-loading";
+      loading.textContent = "문서를 불러오는 중...";
+      els.docViewerBody.append(loading);
+
+      fetch(url)
+        .then((res) => {
+          if (res.redirected) {
+            return fetch(res.url).then((r) => {
+              if (!r.ok) throw new Error(`${r.status}`);
+              return r.text();
+            });
+          }
+          if (!res.ok) throw new Error(`${res.status}`);
+          return res.text();
+        })
+        .then((text) => {
+          els.docViewerBody.replaceChildren();
+          const pre = document.createElement("pre");
+          pre.className = "doc-viewer-text";
+          pre.textContent = text;
+          els.docViewerBody.append(pre);
+        })
+        .catch(() => {
+          els.docViewerBody.replaceChildren();
+          const fallback = document.createElement("div");
+          fallback.className = "doc-viewer-fallback";
+          const p = document.createElement("p");
+          p.textContent = "문서를 표시할 수 없습니다.";
+          const a = document.createElement("a");
+          a.href = url;
+          a.target = "_blank";
+          a.rel = "noreferrer";
+          a.textContent = "새 탭에서 열기 ↗";
+          fallback.append(p, a);
+          els.docViewerBody.append(fallback);
+        });
+    }
+  } else {
+    const noContent = document.createElement("div");
+    noContent.className = "doc-viewer-fallback";
+    noContent.textContent = "문서 URL을 사용할 수 없습니다.";
+    els.docViewerBody.append(noContent);
+  }
+
+  els.docViewerModal.hidden = false;
+  document.body.classList.add("modal-open");
+}
+
+function hideDocumentViewer() {
+  els.docViewerModal.hidden = true;
+  document.body.classList.remove("modal-open");
+  els.docViewerBody.replaceChildren();
+}
+
+/* ── File Cards ── */
 
 function createFileCard(file, variant) {
   const card = document.createElement("div");
@@ -494,6 +1054,8 @@ function fileKindClass(contentType, filename) {
   return "file-kind-doc";
 }
 
+/* ── Helpers ── */
+
 function removeEmptyState() {
   const empty = els.messages.querySelector(".empty-state");
   if (empty) {
@@ -510,7 +1072,7 @@ function autoResizeComposer() {
   els.messageInput.style.height = `${Math.min(els.messageInput.scrollHeight, 190)}px`;
 }
 
-/* ── File Upload ── */
+/* ── File Upload (chat attachments) ── */
 
 async function uploadSelectedFiles(files, sessionId) {
   const uploaded = [];
@@ -691,7 +1253,12 @@ function handleSseEvent(rawEvent, targetEl) {
     hideTypingIndicator(targetEl);
     cancelPendingRender();
     const finalText = data.full_response || state.streamingText;
+    const citations = data.citations || [];
     renderMarkdown(targetEl, finalText);
+    if (citations.length) {
+      processInlineCitations(targetEl, citations);
+    }
+    renderCitations(targetEl.parentElement, citations);
     state.streamingText = "";
     scrollToBottom();
     return;
@@ -701,6 +1268,26 @@ function handleSseEvent(rawEvent, targetEl) {
     hideTypingIndicator(targetEl);
     throw new Error(data.message || "SSE stream error");
   }
+}
+
+/* ── Source Upload Binding ── */
+
+function setupSourceUpload() {
+  const triggerBtn = els.sourceUploadTrigger;
+  
+  if (triggerBtn) {
+    triggerBtn.addEventListener("click", () => {
+      if (!state.isSourceBusy) {
+        els.sourceFileInput.click();
+      }
+    });
+  }
+
+  els.sourceFileInput.addEventListener("change", () => {
+    if (els.sourceFileInput.files.length) {
+      addSelectedSource();
+    }
+  });
 }
 
 /* ── Event Binding ── */
@@ -715,11 +1302,52 @@ function bindEvents() {
   });
 
   els.newChatButton.addEventListener("click", () => {
+    if (state.currentView !== "chat") {
+      switchView("chat");
+    }
     createSession()
       .then(() => setStatus("새 채팅 생성", "ok"))
       .catch((error) => setStatus(formatError(error), "error"));
   });
 
+  // View switching
+  els.viewSourcesButton.addEventListener("click", () => {
+    switchView(state.currentView === "sources" ? "chat" : "sources");
+  });
+
+  if (els.closeSourcesBtn) {
+    els.closeSourcesBtn.addEventListener("click", () => {
+      switchView("chat");
+    });
+  }
+
+  // Sources view
+  els.refreshSourcesBtn.addEventListener("click", () => {
+    loadSources()
+      .then(() => setSourceStatus("소스 목록 갱신", "ok"))
+      .catch((error) => setSourceStatus(formatError(error), "error"));
+  });
+
+  setupSourceUpload();
+
+  // Files pagination
+  els.loadMoreFilesBtn.addEventListener("click", () => {
+    loadFiles(false).catch(console.error);
+  });
+
+  // Document viewer modal
+  els.docViewerClose.addEventListener("click", hideDocumentViewer);
+  const backdrop = els.docViewerModal.querySelector(".modal-backdrop");
+  if (backdrop) {
+    backdrop.addEventListener("click", hideDocumentViewer);
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !els.docViewerModal.hidden) {
+      hideDocumentViewer();
+    }
+  });
+
+  // Chat attachments
   els.fileInput.addEventListener("change", () => {
     const selected = [...els.fileInput.files].map((file) => ({ file, name: file.name }));
     state.attachedFiles.push(...selected);
@@ -733,13 +1361,16 @@ function bindEvents() {
 
   els.messageInput.addEventListener("input", autoResizeComposer);
 
+  // IME composition handling
   let justFinishedComposing = false;
   els.messageInput.addEventListener("compositionstart", () => {
     justFinishedComposing = false;
   });
   els.messageInput.addEventListener("compositionend", () => {
     justFinishedComposing = true;
-    setTimeout(() => { justFinishedComposing = false; }, 0);
+    setTimeout(() => {
+      justFinishedComposing = false;
+    }, 0);
   });
   els.messageInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
