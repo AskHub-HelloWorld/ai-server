@@ -1,4 +1,4 @@
-"""문서 텍스트 추출 — PDF, DOCX, PPTX, 일반 텍스트."""
+"""문서 텍스트 추출 — markitdown 기반 마크다운 변환 + 레거시 fallback."""
 
 from __future__ import annotations
 
@@ -9,9 +9,15 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# 바이너리 파일 제외 확장자
+# markitdown으로 변환 가능한 확장자 (바이너리이지만 텍스트 추출 가능)
+CONVERTIBLE_EXTENSIONS: set[str] = {
+    ".pdf", ".docx", ".pptx", ".xlsx", ".xls", ".csv", ".html",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp",  # OCR 대상
+}
+
+# 바이너리 파일 제외 확장자 (변환 불가능한 순수 바이너리)
 BINARY_EXTENSIONS: set[str] = {
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".svg",
+    ".bmp", ".ico", ".svg",
     ".mp3", ".mp4", ".avi", ".mov", ".wav", ".flac",
     ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
     ".exe", ".dll", ".so", ".dylib", ".bin",
@@ -170,4 +176,85 @@ def load_document_from_bytes(data: bytes, file_path: str) -> LoadedDocument | No
         file_type=detect_file_type(file_path),
         title=Path(file_path).name,
         pages=pages,
+    )
+
+
+# ---------------------------------------------------------------------------
+# markitdown 기반 마크다운 변환
+# ---------------------------------------------------------------------------
+
+
+def convert_to_markdown(data: bytes, file_path: str) -> str:
+    """markitdown으로 문서/이미지 바이트를 마크다운으로 변환한다.
+
+    지원 포맷: PDF, DOCX, PPTX, XLSX, CSV, HTML, 이미지(OCR).
+    변환 실패 시 레거시 텍스트 추출로 fallback한다.
+    """
+    ext = Path(file_path).suffix.lower()
+
+    try:
+        from markitdown import MarkItDown
+
+        md = MarkItDown()
+        result = md.convert_stream(io.BytesIO(data), file_extension=ext)
+        text = result.text_content
+        if text and text.strip():
+            return text
+    except Exception:
+        logger.warning("markitdown 변환 실패, fallback 시도: %s", file_path, exc_info=True)
+
+    # fallback: 기존 텍스트 추출
+    if ext == ".pdf":
+        return extract_pdf_text(data)
+    if ext == ".docx":
+        return extract_docx_text(data)
+    if ext == ".pptx":
+        return extract_pptx_text(data)
+    if ext in CONVERTIBLE_EXTENSIONS:
+        # XLSX, 이미지 등 fallback 불가 → 빈 문자열
+        return ""
+
+    return data.decode("utf-8", errors="replace")
+
+
+def load_document_as_markdown(data: bytes, file_path: str) -> LoadedDocument | None:
+    """문서를 마크다운으로 변환하여 LoadedDocument를 반환한다.
+
+    모든 문서 포맷을 markitdown으로 마크다운 변환한 뒤 content에 저장한다.
+    변환 불가능한 바이너리 파일은 None을 반환한다.
+    """
+    from askhub_ai_server.services.chunker import detect_file_type
+
+    ext = Path(file_path).suffix.lower()
+
+    # 변환 가능한 확장자이면 마크다운 변환 시도
+    if ext in CONVERTIBLE_EXTENSIONS:
+        if not data:
+            return None
+        content = convert_to_markdown(data, file_path)
+        if not content.strip():
+            return None
+        return LoadedDocument(
+            file_path=file_path,
+            content=content,
+            file_type=detect_file_type(file_path),
+            title=Path(file_path).name,
+        )
+
+    # 순수 바이너리 파일은 처리 불가
+    if is_binary_file(file_path):
+        return None
+    if not data:
+        return None
+
+    # 텍스트 계열 파일은 그대로 UTF-8 디코딩
+    content = data.decode("utf-8", errors="replace")
+    if not content.strip():
+        return None
+
+    return LoadedDocument(
+        file_path=file_path,
+        content=content,
+        file_type=detect_file_type(file_path),
+        title=Path(file_path).name,
     )

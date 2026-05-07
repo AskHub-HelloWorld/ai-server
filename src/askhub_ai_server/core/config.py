@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     rag_answerable_threshold: float = 0.5
     rag_max_context_tokens: int = 4000
 
+    # Hybrid search (vector + BM25)
+    rag_bm25_enabled: bool = True
+    rag_rrf_k: int = 60
+    rag_retrieval_k: int = 20
+
     # Database
     database_url: str
     db_schema: str = "ai"

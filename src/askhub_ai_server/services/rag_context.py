@@ -84,6 +84,7 @@ class CitationBuilder:
                 "chunk_index": chunk.chunk_index,
                 "page": chunk.metadata.get("page"),
                 "heading": chunk.metadata.get("heading"),
+                "heading_breadcrumb": chunk.metadata.get("heading_breadcrumb"),
                 "section": chunk.metadata.get("section"),
                 "symbol_name": chunk.metadata.get("symbol_name"),
                 "symbol_type": chunk.metadata.get("symbol_type"),
@@ -244,9 +245,11 @@ def _metadata_details(chunk: RetrievedChunk) -> list[str]:
     page = chunk.metadata.get("page")
     if page:
         details.append(f"page {page}")
-    heading = chunk.metadata.get("heading")
-    if heading:
-        details.append(f"heading: {heading}")
+    breadcrumb = chunk.metadata.get("heading_breadcrumb")
+    if breadcrumb:
+        details.append(f"section: {breadcrumb}")
+    elif chunk.metadata.get("heading"):
+        details.append(f"heading: {chunk.metadata['heading']}")
     symbol = chunk.metadata.get("symbol_name")
     symbol_type = chunk.metadata.get("symbol_type")
     if symbol:

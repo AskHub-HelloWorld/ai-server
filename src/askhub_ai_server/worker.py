@@ -24,7 +24,7 @@ from askhub_ai_server.models.file import UserFile
 from askhub_ai_server.services.chunker import Chunk, chunk_text, estimate_tokens
 from askhub_ai_server.services.embedding import BedrockEmbeddingService, get_embedding_service
 from askhub_ai_server.services.file_storage import get_file_storage
-from askhub_ai_server.services.loaders.document_loader import load_document_from_bytes
+from askhub_ai_server.services.loaders.document_loader import load_document_as_markdown
 from askhub_ai_server.services.loaders.github_loader import load_repository
 
 logger = logging.getLogger(__name__)
@@ -271,29 +271,19 @@ def _process_document_source(
         logger.warning("파일 읽기 실패: %s", user_file.id, exc_info=True)
         return 0
 
-    loaded = load_document_from_bytes(data, user_file.filename)
+    loaded = load_document_as_markdown(data, user_file.filename)
     if loaded is None:
         return 0
 
     pending: list[PendingChunk] = []
     document_summary = _summarize_for_indexing(loaded.content)
-    if loaded.pages:
-        file_chunks = []
-        for page in loaded.pages:
-            file_chunks.extend(chunk_text(
-                page.content,
-                loaded.file_path,
-                source_title=source.name or loaded.title,
-                page=page.page_number,
-                document_summary=document_summary,
-            ))
-    else:
-        file_chunks = chunk_text(
-            loaded.content,
-            loaded.file_path,
-            source_title=source.name or loaded.title,
-            document_summary=document_summary,
-        )
+    file_chunks = chunk_text(
+        loaded.content,
+        loaded.file_path,
+        source_title=source.name or loaded.title,
+        document_summary=document_summary,
+        is_markdown=True,
+    )
     file_chunks = [replace(chunk, chunk_index=index) for index, chunk in enumerate(file_chunks)]
     for chunk in file_chunks:
         pending.append(PendingChunk(chunk=chunk))

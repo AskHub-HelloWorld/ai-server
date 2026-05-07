@@ -10,7 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from askhub_ai_server.services.chunker import detect_file_type
-from askhub_ai_server.services.loaders.document_loader import BINARY_EXTENSIONS
+from askhub_ai_server.services.loaders.document_loader import (
+    BINARY_EXTENSIONS,
+    CONVERTIBLE_EXTENSIONS,
+    convert_to_markdown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -123,17 +127,28 @@ def load_repository(
             if _is_skippable(file_path):
                 continue
 
-            try:
-                content = file_path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                logger.debug("파일 읽기 실패: %s", relative)
-                continue
+            ext = file_path.suffix.lower()
+
+            # 마크다운 변환 대상 문서 파일 (DOCX, PPTX, XLSX, PDF 등)
+            if ext in CONVERTIBLE_EXTENSIONS:
+                try:
+                    data = file_path.read_bytes()
+                    content = convert_to_markdown(data, str(relative))
+                except Exception:
+                    logger.debug("문서 변환 실패: %s", relative)
+                    continue
+            else:
+                try:
+                    content = file_path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    logger.debug("파일 읽기 실패: %s", relative)
+                    continue
+
+                # 널 바이트가 있으면 바이너리로 간주
+                if "\x00" in content[:8192]:
+                    continue
 
             if not content.strip():
-                continue
-
-            # 널 바이트가 있으면 바이너리로 간주
-            if "\x00" in content[:8192]:
                 continue
 
             file_count += 1

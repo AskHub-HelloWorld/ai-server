@@ -238,6 +238,304 @@ def chunk_document(
     return chunks
 
 
+def chunk_markdown(
+    content: str,
+    file_path: str,
+    *,
+    target_tokens: int = 500,
+    source_title: str | None = None,
+    page: int | None = None,
+    document_summary: str | None = None,
+) -> list[Chunk]:
+    """마크다운 구조를 인식하여 청킹한다.
+
+    전략:
+    1. heading 라인(``^#{1,6}\\s+``)으로 섹션 분할
+    2. heading 계층 추적 → breadcrumb (예: ``"설치 가이드 > 사전 요구사항"``)
+    3. 테이블(``|...|``)과 코드 블록(````` ``` `````)은 원자 단위로 보존
+    4. 섹션이 target_tokens 이하면 단일 청크, 초과하면 단락 경계에서 분할
+    5. 각 청크의 metadata에 heading_breadcrumb 포함
+    """
+    file_type = detect_file_type(file_path)
+    title = source_title or _source_title_from_path(file_path)
+    summary = _short_summary(document_summary or content)
+
+    sections = _split_markdown_sections(content)
+    if not sections:
+        return chunk_document(
+            content, file_path, target_tokens=target_tokens,
+            source_title=source_title, page=page, document_summary=document_summary,
+        )
+
+    chunks: list[Chunk] = []
+    chunk_index = 0
+
+    for section in sections:
+        section_tokens = _estimate_word_count(section.content)
+        if section_tokens <= target_tokens:
+            # 섹션이 타겟 이하면 단일 청크
+            if section.content.strip():
+                metadata = _markdown_chunk_metadata(
+                    title, page, section.breadcrumb, summary,
+                )
+                chunks.append(_make_chunk(
+                    content=section.content,
+                    file_path=file_path,
+                    file_type=file_type,
+                    chunk_index=chunk_index,
+                    metadata=metadata,
+                ))
+                chunk_index += 1
+        else:
+            # 섹션이 타겟 초과면 블록 단위로 분할
+            blocks = _split_section_into_blocks(section.content)
+            current_parts: list[str] = []
+            current_word_count = 0
+
+            for block in blocks:
+                block_words = _estimate_word_count(block)
+
+                # 단일 블록이 타겟을 크게 초과하면 문장 단위로 분할
+                is_atomic = _is_table_block(block) or block.strip().startswith("```")
+                if block_words > target_tokens and not is_atomic:
+                    if current_parts:
+                        chunk_content = "\n\n".join(current_parts)
+                        if chunk_content.strip():
+                            metadata = _markdown_chunk_metadata(
+                                title, page, section.breadcrumb, summary,
+                            )
+                            chunks.append(_make_chunk(
+                                content=chunk_content,
+                                file_path=file_path,
+                                file_type=file_type,
+                                chunk_index=chunk_index,
+                                metadata=metadata,
+                            ))
+                            chunk_index += 1
+                        current_parts = []
+                        current_word_count = 0
+
+                    sentences = re.split(r"(?<=[.!?。])\s+", block)
+                    for sent in sentences:
+                        sent_words = _estimate_word_count(sent)
+                        if current_word_count + sent_words > target_tokens and current_parts:
+                            chunk_content = " ".join(current_parts)
+                            if chunk_content.strip():
+                                metadata = _markdown_chunk_metadata(
+                                    title, page, section.breadcrumb, summary,
+                                )
+                                chunks.append(_make_chunk(
+                                    content=chunk_content,
+                                    file_path=file_path,
+                                    file_type=file_type,
+                                    chunk_index=chunk_index,
+                                    metadata=metadata,
+                                ))
+                                chunk_index += 1
+                            current_parts = []
+                            current_word_count = 0
+                        current_parts.append(sent)
+                        current_word_count += sent_words
+                    continue
+
+                if current_word_count + block_words > target_tokens and current_parts:
+                    chunk_content = "\n\n".join(current_parts)
+                    if chunk_content.strip():
+                        metadata = _markdown_chunk_metadata(
+                            title, page, section.breadcrumb, summary,
+                        )
+                        chunks.append(_make_chunk(
+                            content=chunk_content,
+                            file_path=file_path,
+                            file_type=file_type,
+                            chunk_index=chunk_index,
+                            metadata=metadata,
+                        ))
+                        chunk_index += 1
+                    current_parts = []
+                    current_word_count = 0
+
+                current_parts.append(block)
+                current_word_count += block_words
+
+            if current_parts:
+                chunk_content = "\n\n".join(current_parts)
+                if chunk_content.strip():
+                    metadata = _markdown_chunk_metadata(
+                        title, page, section.breadcrumb, summary,
+                    )
+                    chunks.append(_make_chunk(
+                        content=chunk_content,
+                        file_path=file_path,
+                        file_type=file_type,
+                        chunk_index=chunk_index,
+                        metadata=metadata,
+                    ))
+                    chunk_index += 1
+
+    return chunks
+
+
+@dataclass(frozen=True)
+class _MarkdownSection:
+    """마크다운 heading으로 구분된 섹션."""
+
+    content: str
+    breadcrumb: str | None
+
+
+def _split_markdown_sections(content: str) -> list[_MarkdownSection]:
+    """마크다운 heading으로 섹션을 분할하고 heading 계층을 추적한다."""
+    lines = content.split("\n")
+    heading_re = re.compile(r"^(#{1,6})\s+(.+)$")
+
+    sections: list[_MarkdownSection] = []
+    heading_stack: list[tuple[int, str]] = []  # (level, text)
+    current_lines: list[str] = []
+
+    def _breadcrumb() -> str | None:
+        if not heading_stack:
+            return None
+        return " > ".join(text for _, text in heading_stack)
+
+    def flush() -> None:
+        nonlocal current_lines
+        text = "\n".join(current_lines).strip()
+        if text:
+            sections.append(_MarkdownSection(content=text, breadcrumb=_breadcrumb()))
+        current_lines = []
+
+    for line in lines:
+        match = heading_re.match(line)
+        if match:
+            flush()
+            level = len(match.group(1))
+            heading_text = match.group(2).strip()
+            # heading 스택 관리: 현재 레벨 이상의 항목 제거
+            while heading_stack and heading_stack[-1][0] >= level:
+                heading_stack.pop()
+            heading_stack.append((level, heading_text))
+            current_lines.append(line)
+        else:
+            current_lines.append(line)
+
+    flush()
+    return sections
+
+
+def _split_section_into_blocks(content: str) -> list[str]:
+    """섹션을 원자 블록(테이블, 코드 블록, 단락) 단위로 분할한다.
+
+    코드 블록과 테이블은 내부에서 분할하지 않는다.
+    """
+    lines = content.split("\n")
+    blocks: list[str] = []
+    current: list[str] = []
+    in_code_block = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # 코드 블록 토글
+        if stripped.startswith("```"):
+            if in_code_block:
+                # 코드 블록 종료
+                current.append(line)
+                blocks.append("\n".join(current))
+                current = []
+                in_code_block = False
+                continue
+            else:
+                # 코드 블록 시작: 이전 내용 flush
+                if current:
+                    blocks.append("\n".join(current))
+                    current = []
+                current.append(line)
+                in_code_block = True
+                continue
+
+        if in_code_block:
+            current.append(line)
+            continue
+
+        # 빈 줄 = 단락 경계
+        if not stripped:
+            if current:
+                blocks.append("\n".join(current))
+                current = []
+            continue
+
+        current.append(line)
+
+    if current:
+        blocks.append("\n".join(current))
+
+    # 테이블 블록 병합: 연속된 | 라인을 하나의 블록으로
+    merged: list[str] = []
+    i = 0
+    while i < len(blocks):
+        block = blocks[i]
+        if _is_table_block(block):
+            table_parts = [block]
+            while i + 1 < len(blocks) and _is_table_block(blocks[i + 1]):
+                i += 1
+                table_parts.append(blocks[i])
+            merged.append("\n\n".join(table_parts))
+        else:
+            merged.append(block)
+        i += 1
+
+    return [b for b in merged if b.strip()]
+
+
+def _is_table_block(block: str) -> bool:
+    """블록이 마크다운 테이블인지 판별한다."""
+    lines = [line for line in block.strip().split("\n") if line.strip()]
+    if len(lines) < 2:
+        return False
+    return all(line.strip().startswith("|") for line in lines)
+
+
+def _estimate_word_count(text: str) -> int:
+    return len(text.split())
+
+
+def _markdown_chunk_metadata(
+    title: str,
+    page: int | None,
+    breadcrumb: str | None,
+    summary: str,
+) -> dict[str, Any]:
+    return {
+        "chunk_kind": "document",
+        "source_title": title,
+        "page": page,
+        "heading_breadcrumb": breadcrumb,
+        "heading": breadcrumb.split(" > ")[-1] if breadcrumb else None,
+        "section": breadcrumb,
+        "document_summary": summary,
+    }
+
+
+def _looks_like_markdown(content: str) -> bool:
+    """텍스트가 마크다운 형식인지 간단히 판별한다."""
+    indicators = 0
+    sample = content[:4000]  # 처음 4000자만 검사
+
+    if re.search(r"^#{1,6}\s+", sample, re.MULTILINE):
+        indicators += 1
+    if re.search(r"^\|.+\|$", sample, re.MULTILINE):
+        indicators += 1
+    if re.search(r"^```", sample, re.MULTILINE):
+        indicators += 1
+    if re.search(r"^[-*+]\s+", sample, re.MULTILINE):
+        indicators += 1
+    if re.search(r"\[.+\]\(.+\)", sample):
+        indicators += 1
+
+    return indicators >= 2
+
+
 def estimate_tokens(text: str) -> int:
     """UTF-8 바이트 기반 토큰 수 추정 (BPE 근사).
 
@@ -255,6 +553,7 @@ def chunk_text(
     source_title: str | None = None,
     page: int | None = None,
     document_summary: str | None = None,
+    is_markdown: bool = False,
 ) -> list[Chunk]:
     """파일 종류에 따라 적절한 청킹 전략을 선택한다."""
     if is_code_file(file_path):
@@ -262,6 +561,14 @@ def chunk_text(
             content,
             file_path,
             source_title=source_title,
+        ))
+    if is_markdown or _looks_like_markdown(content):
+        return enforce_max_chunk_chars(chunk_markdown(
+            content,
+            file_path,
+            source_title=source_title,
+            page=page,
+            document_summary=document_summary,
         ))
     return enforce_max_chunk_chars(chunk_document(
         content,
