@@ -916,6 +916,7 @@ def _make_chunk(
         line_end=line_end,
         metadata=metadata,
     )
+    search_text = _korean_tokenize_if_enabled(embedding_text)
     return Chunk(
         content=content,
         file_path=file_path,
@@ -924,7 +925,7 @@ def _make_chunk(
         line_start=line_start,
         line_end=line_end,
         embedding_text=embedding_text,
-        search_text=embedding_text,
+        search_text=search_text,
         metadata=metadata,
     )
 
@@ -1037,6 +1038,20 @@ def _detect_heading(paragraph: str) -> str | None:
     if len(text.split()) <= 8 and not any(ch in text for ch in ",;:"):
         return text
     return None
+
+
+def _korean_tokenize_if_enabled(text: str) -> str:
+    """한국어 형태소 분석기가 활성화되어 있으면 search_text를 토크나이즈한다."""
+    try:
+        from askhub_ai_server.core.config import get_settings
+
+        if not get_settings().korean_tokenizer_enabled:
+            return text
+        from askhub_ai_server.services.korean_tokenizer import tokenize_for_search
+
+        return tokenize_for_search(text)
+    except Exception:
+        return text
 
 
 def _short_summary(text: str, *, max_chars: int = 500) -> str:

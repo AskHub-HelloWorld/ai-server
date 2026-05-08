@@ -63,6 +63,7 @@ def _get_chat_service(
         max_context_tokens=settings.rag_max_context_tokens,
         query_rewriter=llm,
         answerable_threshold=settings.rag_answerable_threshold,
+        settings=settings,
     )
     return ChatService(
         db=db, settings=settings, llm=llm, rag_builder=rag_builder,
@@ -248,10 +249,12 @@ def stream_session_message(
         citations = prepared.rag_citations or []
         full_response, citations = normalize_inline_citations(full_response, citations)
         answerable = prepared.rag_answerable
+        rag_summary = ChatService._build_rag_context_summary(citations)
         try:
             _complete_assistant_in_new_session(
                 prepared.assistant_message_id, full_response,
                 citations=citations, answerable=answerable,
+                rag_context_summary=rag_summary,
             )
         except Exception:
             logger.exception("세션 메시지 스트리밍 저장 실패")
@@ -287,12 +290,14 @@ def _complete_assistant_in_new_session(
     *,
     citations: list[dict] | None = None,
     answerable: bool = False,
+    rag_context_summary: str | None = None,
 ) -> None:
     """Complete a pending assistant message using a fresh DB session."""
     with SessionLocal() as db:
         repo = MessageRepository(db)
         repo.complete_assistant_message(
             message_id, content, answerable=answerable, citations=citations or [],
+            rag_context_summary=rag_context_summary,
         )
 
 

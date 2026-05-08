@@ -110,6 +110,17 @@ class PgVectorRetriever:
         results = self._db.execute(stmt).all()
         return [self._row_to_chunk(row) for row in results]
 
+    def _tokenize_query(self, query: str) -> str:
+        """한국어 형태소 분석기가 활성화되어 있으면 BM25 질의를 토크나이즈한다."""
+        if not self._settings.korean_tokenizer_enabled:
+            return query
+        try:
+            from askhub_ai_server.services.korean_tokenizer import tokenize_for_search
+
+            return tokenize_for_search(query)
+        except Exception:
+            return query
+
     def _bm25_search(
         self,
         query: str,
@@ -117,7 +128,8 @@ class PgVectorRetriever:
         top_k: int,
     ) -> list[RetrievedChunk]:
         """PostgreSQL tsvector 기반 BM25 키워드 검색."""
-        tsquery = func.plainto_tsquery("simple", query)
+        tokenized_query = self._tokenize_query(query)
+        tsquery = func.plainto_tsquery("simple", tokenized_query)
         tsvector = func.to_tsvector(
             "simple",
             func.coalesce(DocumentChunk.search_text, DocumentChunk.content),
@@ -183,6 +195,89 @@ class PgVectorRetriever:
 
         sorted_ids = sorted(scores, key=lambda cid: scores[cid], reverse=True)[:top_k]
         return [chunk_map[cid] for cid in sorted_ids]
+
+    def fetch_neighbor_chunks(
+        self,
+        chunks: list[RetrievedChunk],
+        window: int = 1,
+    ) -> dict[uuid.UUID, list[RetrievedChunk]]:
+        """검색된 청크의 ±window 이웃 청크를 일괄 조회한다.
+
+        Returns:
+            dict mapping original chunk_id -> list of neighbor chunks (sorted by chunk_index).
+        """
+        if not chunks or window < 1:
+            return {}
+
+        # 이웃 조건 수집: (source_id, file_path, chunk_index) 목록
+        original_keys: set[tuple[uuid.UUID, str, int]] = set()
+        neighbor_conditions: list[tuple[uuid.UUID, str, int]] = []
+        chunk_lookup: dict[tuple[uuid.UUID, str, int], uuid.UUID] = {}
+
+        for chunk in chunks:
+            key = (chunk.source_id, chunk.file_path, chunk.chunk_index)
+            original_keys.add(key)
+            for offset in range(-window, window + 1):
+                if offset == 0:
+                    continue
+                neighbor_idx = chunk.chunk_index + offset
+                if neighbor_idx < 0:
+                    continue
+                nkey = (chunk.source_id, chunk.file_path, neighbor_idx)
+                if nkey not in original_keys:
+                    neighbor_conditions.append(nkey)
+                    chunk_lookup[nkey] = chunk.chunk_id
+
+        if not neighbor_conditions:
+            return {}
+
+        # 일괄 조회를 위한 OR 조건 구성
+        from sqlalchemy import and_, or_, literal
+
+        or_clauses = []
+        for source_id, file_path, chunk_index in set(neighbor_conditions):
+            or_clauses.append(
+                and_(
+                    DocumentChunk.source_id == source_id,
+                    DocumentChunk.file_path == file_path,
+                    DocumentChunk.chunk_index == chunk_index,
+                )
+            )
+
+        stmt = (
+            select(
+                DocumentChunk,
+                RagSource.name.label("source_name"),
+                RagSource.source_type.label("source_type"),
+                RagSource.file_id.label("source_file_id"),
+                literal(0.0).label("similarity"),
+            )
+            .join(RagSource, DocumentChunk.source_id == RagSource.id)
+            .where(or_(*or_clauses))
+        )
+
+        results = self._db.execute(stmt).all()
+
+        # 원본 청크 ID → 이웃 청크 리스트 매핑
+        neighbor_map: dict[uuid.UUID, list[RetrievedChunk]] = {}
+        for row in results:
+            nkey = (row.DocumentChunk.source_id, row.DocumentChunk.file_path, row.DocumentChunk.chunk_index)
+            neighbor_chunk = self._row_to_chunk(row)
+            # 이 이웃이 어떤 원본 청크에 속하는지 찾기
+            for chunk in chunks:
+                if (
+                    chunk.source_id == row.DocumentChunk.source_id
+                    and chunk.file_path == row.DocumentChunk.file_path
+                    and abs(chunk.chunk_index - row.DocumentChunk.chunk_index) <= window
+                    and chunk.chunk_index != row.DocumentChunk.chunk_index
+                ):
+                    neighbor_map.setdefault(chunk.chunk_id, []).append(neighbor_chunk)
+
+        # 이웃 청크를 chunk_index 순으로 정렬
+        for chunk_id in neighbor_map:
+            neighbor_map[chunk_id].sort(key=lambda c: c.chunk_index)
+
+        return neighbor_map
 
     @staticmethod
     def _row_to_chunk(row: Any) -> RetrievedChunk:

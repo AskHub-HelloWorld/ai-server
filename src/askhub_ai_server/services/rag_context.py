@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from askhub_ai_server.core.config import Settings
 from askhub_ai_server.models.enums import SourceType
 from askhub_ai_server.services.chunker import estimate_tokens
 from askhub_ai_server.services.retriever import PgVectorRetriever, RetrievedChunk
@@ -129,11 +131,13 @@ class RagContextBuilder:
         max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
         query_rewriter: QueryRewriter | None = None,
         answerable_threshold: float = 0.5,
+        settings: Settings | None = None,
     ) -> None:
         self._retriever = retriever
         self._max_context_tokens = max_context_tokens
         self._query_rewriter = query_rewriter
         self._answerable_threshold = answerable_threshold
+        self._settings = settings
 
     def build(self, query: str, team_id: int | None) -> RagContext:
         """사용자 질문으로 관련 청크를 검색하고 LLM context + Citation을 구성한다."""
@@ -151,11 +155,27 @@ class RagContextBuilder:
             )
             return RagContext(text="", citations=[], chunks=[])
 
-        selected_chunks = self._limit_chunks_by_tokens(CitationBuilder.deduplicate(chunks))
+        deduped = CitationBuilder.deduplicate(chunks)
+
+        # 이웃 청크 확장 — 검색된 청크의 ±N 이웃을 함께 포함
+        neighbor_map: dict[uuid.UUID, list[RetrievedChunk]] = {}
+        if (
+            self._settings is not None
+            and self._settings.rag_neighbor_chunks_enabled
+        ):
+            try:
+                neighbor_map = self._retriever.fetch_neighbor_chunks(
+                    deduped,
+                    window=self._settings.rag_neighbor_window,
+                )
+            except Exception:
+                logger.warning("이웃 청크 조회 실패 — 원래 청크만 사용", exc_info=True)
+
+        selected_chunks = self._limit_chunks_by_tokens(deduped, neighbor_map)
         if not selected_chunks:
             return RagContext(text="", citations=[], chunks=[])
 
-        context_text = self._format_context(selected_chunks)
+        context_text = self._format_context(selected_chunks, neighbor_map)
         citations = CitationBuilder.build(selected_chunks)
 
         best_similarity = max(c.similarity for c in selected_chunks)
@@ -207,12 +227,20 @@ class RagContextBuilder:
                     merged[key] = chunk
         return sorted(merged.values(), key=lambda chunk: chunk.similarity, reverse=True)
 
-    def _limit_chunks_by_tokens(self, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    def _limit_chunks_by_tokens(
+        self,
+        chunks: list[RetrievedChunk],
+        neighbor_map: dict[uuid.UUID, list[RetrievedChunk]] | None = None,
+    ) -> list[RetrievedChunk]:
         budget = max(self._max_context_tokens, 1)
         selected: list[RetrievedChunk] = []
         used = 0
         for chunk in chunks:
             estimated = estimate_tokens(chunk.content) + 20
+            # 이웃 청크 토큰도 예산에 포함
+            if neighbor_map:
+                for neighbor in neighbor_map.get(chunk.chunk_id, []):
+                    estimated += estimate_tokens(neighbor.content) + 10
             if selected and used + estimated > budget:
                 break
             selected.append(chunk)
@@ -222,7 +250,10 @@ class RagContextBuilder:
         return selected
 
     @staticmethod
-    def _format_context(chunks: list[RetrievedChunk]) -> str:
+    def _format_context(
+        chunks: list[RetrievedChunk],
+        neighbor_map: dict[uuid.UUID, list[RetrievedChunk]] | None = None,
+    ) -> str:
         """검색된 청크를 '[참고자료 N]' 형식의 LLM 입력 텍스트로 변환한다."""
         parts: list[str] = []
         for i, chunk in enumerate(chunks, 1):
@@ -235,7 +266,23 @@ class RagContextBuilder:
             details = _metadata_details(chunk)
             if details:
                 header += f" [{', '.join(details)}]"
-            parts.append(f"{header}\n원문:\n{chunk.content}")
+
+            # 이웃 청크 확장
+            neighbors = (neighbor_map or {}).get(chunk.chunk_id, [])
+            preceding = [n for n in neighbors if n.chunk_index < chunk.chunk_index]
+            following = [n for n in neighbors if n.chunk_index > chunk.chunk_index]
+
+            body_parts: list[str] = []
+            if preceding:
+                body_parts.append("[...앞 문맥...]")
+                body_parts.extend(n.content for n in preceding)
+            body_parts.append(chunk.content)
+            if following:
+                body_parts.append("[...뒤 문맥...]")
+                body_parts.extend(n.content for n in following)
+
+            body = "\n\n".join(body_parts)
+            parts.append(f"{header}\n원문:\n{body}")
 
         return _RAG_CONTEXT_INSTRUCTIONS + "\n\n" + "\n\n---\n\n".join(parts)
 

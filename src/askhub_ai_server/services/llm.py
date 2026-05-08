@@ -28,6 +28,8 @@ SYSTEM_PROMPT = _load_prompt("system")
 QUERY_REWRITE_SYSTEM_PROMPT = _load_prompt("query_rewrite")
 SUMMARIZE_SYSTEM_PROMPT = _load_prompt("summarize")
 CODEBASE_SUMMARIZE_SYSTEM_PROMPT = _load_prompt("codebase_summarize")
+QUERY_CLASSIFY_SYSTEM_PROMPT = _load_prompt("query_classify")
+HISTORY_SUMMARIZE_SYSTEM_PROMPT = _load_prompt("history_summarize")
 
 IMAGE_CONTENT_TYPE_TO_BEDROCK_FORMAT = {
     "image/png": "png",
@@ -132,6 +134,28 @@ class BedrockLLMService:
                 modelId=self._model_id,
                 messages=[{"role": "user", "content": [{"text": text}]}],
                 system=[{"text": CODEBASE_SUMMARIZE_SYSTEM_PROMPT}],
+                inferenceConfig={"maxTokens": 500, "temperature": 0.3},
+            )
+            return _extract_text_response(response)
+
+    def classify_query(self, query: str) -> str:
+        """사용자 질문의 의도를 분류한다 (rag / chat / followup)."""
+        with circuit_protected(self._circuit, "classify_query", self._model_id):
+            response = self._client.converse(
+                modelId=self._model_id,
+                messages=[{"role": "user", "content": [{"text": query}]}],
+                system=[{"text": QUERY_CLASSIFY_SYSTEM_PROMPT}],
+                inferenceConfig={"maxTokens": 10, "temperature": 0.0},
+            )
+            return _extract_text_response(response)
+
+    def summarize_history(self, text: str) -> str:
+        """대화 히스토리를 요약한다."""
+        with circuit_protected(self._circuit, "summarize_history", self._model_id):
+            response = self._client.converse(
+                modelId=self._model_id,
+                messages=[{"role": "user", "content": [{"text": text}]}],
+                system=[{"text": HISTORY_SUMMARIZE_SYSTEM_PROMPT}],
                 inferenceConfig={"maxTokens": 500, "temperature": 0.3},
             )
             return _extract_text_response(response)

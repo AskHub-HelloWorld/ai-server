@@ -27,6 +27,24 @@ class Settings(BaseSettings):
     rag_rrf_k: int = 60
     rag_retrieval_k: int = 20
 
+    # Korean morphological analysis for BM25
+    korean_tokenizer_enabled: bool = True
+
+    # Neighbor chunk expansion (contextual retrieval)
+    rag_neighbor_chunks_enabled: bool = True
+    rag_neighbor_window: int = 1
+
+    # Previous turn RAG context preservation
+    rag_context_preservation_enabled: bool = True
+
+    # Query routing / intent classification
+    query_routing_enabled: bool = True
+
+    # Conversation history summarization
+    history_summarize_enabled: bool = True
+    history_summarize_threshold: int = 14
+    history_recent_count: int = 10
+
     # Database
     database_url: str
     db_schema: str = "ai"

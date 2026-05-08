@@ -60,6 +60,7 @@ class Message(Base):
     failure_reason: Mapped[str | None] = mapped_column(Text)
     answerable: Mapped[bool | None] = mapped_column(Boolean)
     citations: Mapped[list[dict] | None] = mapped_column(JSONB)
+    rag_context_summary: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
