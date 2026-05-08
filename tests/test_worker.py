@@ -49,6 +49,11 @@ def test_process_document_source_reads_only_linked_file(
     db_session: Session,
     monkeypatch,
 ) -> None:
+    # 한국어 토크나이저가 search_text를 변환하므로 테스트에서는 비활성화
+    monkeypatch.setattr(
+        "askhub_ai_server.services.chunker._korean_tokenize_if_enabled",
+        lambda text: text,
+    )
     linked_file = _create_file(db_session, filename="linked.txt")
     other_file = _create_file(db_session, filename="other.txt")
     source = RagSource(

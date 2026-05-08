@@ -50,6 +50,9 @@ class FakeRetriever:
         self.queries.append((query, team_id))
         return self.chunks
 
+    def fetch_neighbor_chunks(self, chunks, window=1):
+        return {}
+
 
 class QueryMappedRetriever:
     def __init__(self, chunks_by_query):

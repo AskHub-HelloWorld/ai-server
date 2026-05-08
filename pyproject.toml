@@ -31,6 +31,7 @@ askhub-worker = "askhub_ai_server.worker:main"
 [project.optional-dependencies]
 dev = [
     "httpx>=0.27,<1",
+    "matplotlib>=3.8,<4",
     "pytest>=8.0,<9",
     "ruff>=0.8,<1",
 ]
