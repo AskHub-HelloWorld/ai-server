@@ -66,6 +66,8 @@ class PreparedChatMessage:
     def __post_init__(self) -> None:
         if self.rag_citations is None:
             object.__setattr__(self, "rag_citations", [])
+        if not isinstance(self.rag_answerable, bool):
+            object.__setattr__(self, "rag_answerable", bool(self.rag_answerable))
 
 
 @dataclass(frozen=True)

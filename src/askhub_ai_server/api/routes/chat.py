@@ -248,7 +248,7 @@ def stream_session_message(
         # 3. persist completed assistant message (separate DB session)
         citations = prepared.rag_citations or []
         full_response, citations = normalize_inline_citations(full_response, citations)
-        answerable = prepared.rag_answerable
+        answerable = bool(prepared.rag_answerable)
         rag_summary = ChatService._build_rag_context_summary(citations)
         try:
             _complete_assistant_in_new_session(
