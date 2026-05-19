@@ -228,7 +228,7 @@ ai-server는 streaming 시작 전에 user 메시지를 저장하고, `done` 이�
 
 문서 또는 레포지토리 소스 메타데이터를 `ai.rag_sources`에 등록한다. 팀 ID는 service-to-service 헤더의 팀 context를 사용한다.
 
-요청 예시:
+레포지토리 소스 요청 예시:
 
 ```json
 {
@@ -238,6 +238,18 @@ ai-server는 streaming 시작 전에 user 메시지를 저장하고, `done` 이�
   "default_branch": "main"
 }
 ```
+
+문서 소스 요청 예시:
+
+```json
+{
+  "source_type": "document",
+  "name": "guide.pdf",
+  "file_id": "660e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+문서 소스의 `file_id`는 `POST /v1/files/upload` 응답의 `id`를 사용한다. 이 값은 파일 메타데이터 ID이며, RAG 소스 삭제에 사용하는 `source_id`가 아니다. RAG 소스 삭제와 인덱싱 작업 생성에는 `POST /v1/sources` 응답의 `source_id`를 사용한다.
 
 ### `POST /v1/ingestion-jobs`
 
@@ -274,6 +286,8 @@ ai-server는 streaming 시작 전에 user 메시지를 저장하고, `done` 이�
   "created_at": "2026-04-12T07:00:00Z"
 }
 ```
+
+응답의 `id`는 `ai.user_files.id`에 해당하는 `file_id`다. `purpose=rag_source`로 업로드하더라도 이 API는 파일만 저장하며 `ai.rag_sources` row를 만들지 않는다. 문서를 RAG 소스로 사용하려면 이 `id`를 `POST /v1/sources`의 `file_id`로 전달하고, 그 응답의 `source_id`를 별도로 저장해야 한다.
 
 내부 `storage_path`는 응답하지 않는다. `purpose=chat_attachment`인 파일은 채팅 메시지 전송 시 `file_ids`에 포함하여 LLM context로 활용한다. 업로드 단계에서는 content type으로 차단하지 않고, 채팅 단계에서 텍스트/이미지/기타 binary 파일을 분기 처리한다.
 
@@ -326,6 +340,8 @@ ai-server는 streaming 시작 전에 user 메시지를 저장하고, `done` 이�
 ### `DELETE /v1/sources/{source_id}`
 
 RAG 소스를 삭제한다. 연결된 `ingestion_jobs`와 `document_chunks`도 CASCADE 삭제된다.
+
+`source_id`는 `POST /v1/sources` 또는 `GET /v1/sources` 응답의 `source_id`다. `POST /v1/files/upload` 응답의 `id`는 `file_id`이므로 이 경로에 넣으면 `source not found`가 반환된다.
 
 팀 context와 소스의 `team_id`가 일치해야 한다. 불일치 시 404를 반환한다.
 
